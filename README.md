@@ -5,7 +5,8 @@ It's a free and open source app made in Claude AI and Gemini that makes your lif
 
 ### Open window by pressing ` button (by default) to bring panel up. Key can be changed in settings.
 
-<img width="1920" height="1080" alt="firefox_wKSfKeF8yA" src="https://github.com/user-attachments/assets/efdd57c7-4e6a-4df4-a7f9-108b00ce45bd" />
+<img width="1920" height="1080" alt="firefox_wKSfKeF8yAa" src="https://github.com/user-attachments/assets/e94fe928-0081-438c-9fc4-b7f4aeba4014" />
+
 <br><br>
 
 ### The app alows you to store text, image and even Excel data every time you copy sth to your clipboard.
