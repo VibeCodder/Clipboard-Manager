@@ -4,11 +4,15 @@ It's a free and open source app made in Claude AI and Gemini that makes your lif
 <br><br>
 
 ### Open window by pressing ` button (by default) to bring panel up. Key can be changed in settings.
-<img width="1920" height="375" alt="pythonw_kAP8Pwiodl" src="https://github.com/user-attachments/assets/b8341bfe-4f9d-4547-aedb-7be71918eb4b" />
+
+<img width="1920" height="1080" alt="firefox_wKSfKeF8yA" src="https://github.com/user-attachments/assets/efdd57c7-4e6a-4df4-a7f9-108b00ce45bd" />
 <br><br>
 
 ### The app alows you to store text, image and even Excel data every time you copy sth to your clipboard.
 Even multiple tabs can be created for easier management. You can pin, change text of your cards anytime.  
+
+<img width="1920" height="375" alt="pythonw_kAP8Pwiodl" src="https://github.com/user-attachments/assets/b8341bfe-4f9d-4547-aedb-7be71918eb4b" />
+
 There're two remove buttons:  
 - `Remove all 🗑️` removes all from board (within current tab) but pinned cards  
 - `Remove all 🗑️📌` removes all from board (within current tab) including pinned cards.
