@@ -8,7 +8,7 @@ It's a free and open source app made in Claude AI and Gemini that makes your lif
 ### Once starting the app it will be running in the background.
 ### Tap <code>`</code> button (by default) to bring panel up. The same key pressed again hides it. Key can be changed in settings.
 <br>
-<img width="1920" height="1080" alt="firefox_wKSfKeF8yAa" src="https://github.com/user-attachments/assets/e94fe928-0081-438c-9fc4-b7f4aeba4014" />
+<img width="1920" height="1080" alt="firefox_kymzKu3qbKk" src="https://github.com/user-attachments/assets/3c01ba96-cd8a-4119-9bc9-11117776d62d" />
 <br>
 
 ### The app alows you to store text, image and even Excel data every time you copy sth to your clipboard.
