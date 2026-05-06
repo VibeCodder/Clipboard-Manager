@@ -1,6 +1,6 @@
 # Clipboard Manager
 ### It's a free and open source app that makes your life easier by managing all of your's clipboard data into switchable on-screen board.
-<img width="1328" height="1328" alt="Qwen-Image-2512-FP8-New_00048_" src="https://github.com/user-attachments/assets/c0ab87d3-38a2-46cf-9ada-900b5e5eafbc" />
+<img width="512" height="512" alt="clipboard-manager-icon-smaller" src="https://github.com/user-attachments/assets/209e0af0-4da1-4937-99e7-e4523e8a487d" />
 <br><br>
 
 ### Open window by pressing ` button (by default) to bring panel up. Key can be changed in settings.
