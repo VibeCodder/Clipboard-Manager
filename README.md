@@ -5,8 +5,8 @@ It's a free and open source app made in Claude AI and Gemini that makes your lif
 <img width="512" height="512" alt="clipboard-manager-icon-smaller" src="https://github.com/user-attachments/assets/209e0af0-4da1-4937-99e7-e4523e8a487d" />
 <br>
 
-### Once starting the app it is running in the background.
-### Open window by pressing ` button (by default) to bring panel up. The same key pressed again hides it. Key can be changed in settings.
+### Once starting the app it will be running in the background.
+Open window by pressing ` button (by default) to bring panel up. The same key pressed again hides it. Key can be changed in settings.
 <br>
 <img width="1920" height="1080" alt="firefox_wKSfKeF8yAa" src="https://github.com/user-attachments/assets/e94fe928-0081-438c-9fc4-b7f4aeba4014" />
 <br>
