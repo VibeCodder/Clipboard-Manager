@@ -538,7 +538,25 @@ class Board(QWidget):
         lay.addWidget(self.scroll)
 
     def add_item(self, item):
-        self.items.insert(0, item); self._rebuild()
+        # --- ZMIANA: Usuwanie duplikatu i przesuwanie na górę ---
+        to_remove = None
+        for existing in self.items:
+            if existing.ctype == item.ctype:
+                if item.ctype == "text" and existing.text == item.text:
+                    to_remove = existing
+                    break
+                elif item.ctype == "image" and existing.img_b64 == item.img_b64:
+                    to_remove = existing
+                    break
+                    
+        if to_remove:
+            # Transferujemy właściwości z istniejącej karty
+            item.pinned = to_remove.pinned
+            item.label = to_remove.label
+            self.items.remove(to_remove)
+            
+        self.items.insert(0, item)
+        self._rebuild()
 
     def remove_item(self, item):
         if item in self.items: self.items.remove(item); self._rebuild()
@@ -832,6 +850,15 @@ class MainPanel(QWidget):
             self._btn_pause.setText("stopped ⏸️")
         else:
             self._btn_pause.setText("works ⏸️")
+            # --- ZMIANA: Sync schowka przy wznowieniu, by zignorować to co już tam jest ---
+            cb = QGuiApplication.clipboard()
+            mime = cb.mimeData()
+            self._last_text = cb.text().strip() if mime.hasText() else ""
+            if mime.hasImage() and mime.hasFormat("image/png"):
+                self._last_img = (mime.data("image/png").size(), "png")
+            elif mime.hasImage():
+                img = cb.image()
+                self._last_img = (img.width(), img.height(), img.pixel(0,0) if img.width()>0 else 0) if not img.isNull() else None
 
     def _on_search(self, t):
         if self._boards: self._boards[self._last_tab].set_filter(t)
@@ -858,69 +885,62 @@ class MainPanel(QWidget):
     # ── Clipboard ───────────────────────────────────────────────────────────
 
     def _setup_clipboard(self):
-        self._last_text = ""; self._last_img = None
-        t = QTimer(); t.timeout.connect(self._poll_clip); t.start(300)
-        self._clip_timer = t
+        self._last_update = 0  # Zmienna do zapobiegania spamowi zdarzeń
+        cb = QGuiApplication.clipboard()
+        # Zamiast QTimer, używamy sygnału systemowego - reaguje na sam fakt "Kopiuj"
+        cb.dataChanged.connect(self._poll_clip)
 
-    # ZAKTUALIZOWANA FUNKCJA: Mądrzejsze przechwytywanie Excela/tabel i obsługa surowego PNG
     def _poll_clip(self):
         if self._is_paused: 
             return
             
+        # Zabezpieczenie przed wielokrotnym wyzwalaniem sygnału przez system (debounce)
+        # Ignorujemy zdarzenia występujące częściej niż co 0.2 sekundy
+        now = time.time()
+        if now - getattr(self, '_last_update', 0) < 0.2:
+            return
+        self._last_update = now
+        
         cb = QGuiApplication.clipboard()
         mime = cb.mimeData()
         
         t = cb.text().strip() if mime.hasText() else ""
         has_html_table = mime.hasHtml() and "<table" in mime.html().lower()
         
-        # Jeśli tekst ma formę tabeli (zawiera \t z Excela) LUB jest wprost tabelą HTML:
         is_excel_or_table = t and ("\t" in t or has_html_table)
         
-        # PRIORYTET 1: Tabela/Excel - zawsze jako tekst
+        # Usunęliśmy sprawdzanie "t != self._last_text", bo teraz reagujemy 
+        # tylko na realne zdarzenie zmiany wywołane przez użytkownika.
+        
+        # PRIORYTET 1: Tabela/Excel
         if is_excel_or_table:
-            if t != self._last_text:
-                self._last_text = t
-                self._last_img = None
-                self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-                self._save_data()
-                
-        # PRIORYTET 2: Obraz (z obsługą kanału alpha dla systemów Windows)
+            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+            self._save_data()
+            
+        # PRIORYTET 2: Standardowy tekst
+        elif t:
+            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+            self._save_data()
+            
+        # PRIORYTET 3: Obraz
         elif mime.hasImage():
-            # Próbujemy pobrać bezpośrednio surowe dane PNG
             if mime.hasFormat("image/png"):
                 ba = mime.data("image/png")
-                key = (ba.size(), "png") # Używamy rozmiaru jako prostego identyfikatora zmiany
-                if key != self._last_img:
-                    self._last_img = key
-                    self._last_text = ""
+                self._boards[self._last_tab].add_item(
+                    ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
+                )
+                self._save_data()
+            else:
+                img = cb.image()
+                if not img.isNull():
+                    ba = QByteArray()
+                    buf = QBuffer(ba)
+                    buf.open(QBuffer.WriteOnly)
+                    img.save(buf, "PNG")
                     self._boards[self._last_tab].add_item(
                         ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
                     )
                     self._save_data()
-            else:
-                # Opcja awaryjna (standardowy QImage), jeśli aplikacja wysyłająca nie dała raw PNG
-                img = cb.image()
-                if not img.isNull():
-                    key = (img.width(), img.height(), img.pixel(0,0) if img.width()>0 else 0)
-                    if key != self._last_img:
-                        self._last_img = key
-                        self._last_text = ""
-                        ba = QByteArray()
-                        buf = QBuffer(ba)
-                        buf.open(QBuffer.WriteOnly)
-                        img.save(buf, "PNG")
-                        self._boards[self._last_tab].add_item(
-                            ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
-                        )
-                        self._save_data()
-                        
-        # PRIORYTET 3: Czysty, standardowy tekst
-        elif t:
-            if t != self._last_text:
-                self._last_text = t
-                self._last_img = None
-                self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-                self._save_data()
 
     # ── Tray ────────────────────────────────────────────────────────────────
 
