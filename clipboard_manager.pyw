@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QScrollArea, QLineEdit, QSystemTrayIcon, QMenu, QDialog,
     QMessageBox, QInputDialog, QFrame, QSizePolicy, QTextEdit, QSpinBox,
-    QLayout,
+    QLayout, QCheckBox,
 )
 # DODANO QMimeData DO IMPORTÓW PONIŻEJ
 from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QEvent, QBuffer, QSize, QRect, QPoint, QMimeData
@@ -45,6 +45,7 @@ DEFAULT_CONFIG = {
     "panel_height": 560,
     "bar_height":   300,
     "panel_width":  820,
+    "excel_dependent": False,
 }
 
 # ─── Palette ──────────────────────────────────────────────────────────────────
@@ -398,6 +399,13 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._note("Bottom Bar spans full width, anchored to the bottom edge."))
         lay.addWidget(self._sep())
 
+        self.cb_excel_dep = QCheckBox("Excel mode depends from 'works' mode")
+        self.cb_excel_dep.setChecked(cfg.get("excel_dependent", False))
+        self.cb_excel_dep.setStyleSheet(f"color:{C['t1']}; spacing: 8px;")
+        lay.addWidget(self.cb_excel_dep)
+        lay.addWidget(self._note("Check if Excel mode should be paused when clipboard listening is paused. Uncheck (default) for cleanup to always run."))
+        lay.addWidget(self._sep())
+
         lay.addWidget(self._lbl("Size (px):"))
         hr = QHBoxLayout(); hr.setSpacing(16)
         for attr, label, lo, hi, val in [
@@ -426,6 +434,7 @@ class SettingsDialog(QDialog):
         self.cfg["panel_height"] = self.spin_ph.value()
         self.cfg["panel_width"]  = self.spin_pw.value()
         self.cfg["bar_height"]   = self.spin_bh.value()
+        self.cfg["excel_dependent"] = self.cb_excel_dep.isChecked()
         self.accept()
 
     def get(self): return self.cfg
@@ -492,9 +501,29 @@ class ClipCard(QFrame):
             lbl.setStyleSheet("background:transparent;")
             bl.addWidget(lbl)
         else:
-            txt = QLabel(self.item.text[:300]); txt.setWordWrap(True)
-            txt.setAlignment(Qt.AlignTop | Qt.AlignLeft) 
-            txt.setStyleSheet(f"color:{C['t2']};font-size:12px;background:transparent;")
+            # TEXT DISPLAY - Wykorzystujemy QTextEdit dla identycznego wyglądu jak w edytorze
+            txt = QTextEdit()
+            txt.setPlainText(self.item.text[:500]) # Pokazujemy nieco więcej tekstu
+            txt.setReadOnly(True)
+            txt.setFrameStyle(QFrame.NoFrame)
+            txt.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            txt.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            
+            # To sprawia, że kliknięcia "przelatują" przez tekst do karty pod spodem
+            txt.setAttribute(Qt.WA_TransparentForMouseEvents)
+            
+            # Usuwamy marginesy wewnętrzne dokumentu
+            txt.document().setDocumentMargin(0)
+            
+            txt.setStyleSheet(f"""
+                QTextEdit {{
+                    color: {C['t2']};
+                    background: transparent;
+                    border: none;
+                    font-size: 11px;
+                }}
+            """)
+            txt.setFixedHeight(60) # Dopasuj wysokość do rozmiaru swoich kart
             bl.addWidget(txt)
         ts = QLabel(datetime.fromtimestamp(self.item.ts).strftime("%H:%M  %d %b"))
         ts.setStyleSheet(f"color:{C['t3']};font-size:11px;background:transparent;")
@@ -759,6 +788,17 @@ class MainPanel(QWidget):
         tb.addWidget(self._btn_pause)
         tb.addSpacing(4)
 
+        self._cb_excel = QCheckBox("Excel mode")
+        self._cb_excel.setObjectName("CbExcel")
+        self._cb_excel.setStyleSheet(f"""
+            QCheckBox {{ color: {C['t2']}; spacing: 5px; }}
+            QCheckBox::indicator {{ width: 14px; height: 14px; background: {C['card']}; border: 1px solid {C['border']}; border-radius: 3px; }}
+            QCheckBox::indicator:checked {{ background: {C['acc']}; border-color: {C['acc']}; }}
+        """)
+        self._cb_excel.setToolTip("Automatycznie usuwa skrajne cudzysłowy ze skopiowanego tekstu")
+        tb.addWidget(self._cb_excel)
+        tb.addSpacing(4)
+
         for sym, obj, tip, fn in [
             ("⏻","BtnQuit","Quit",     self._quit),
             ("⚙","BtnIcon","Settings", self._settings),
@@ -891,8 +931,14 @@ class MainPanel(QWidget):
         cb.dataChanged.connect(self._poll_clip)
 
     def _poll_clip(self):
+        excel_on = hasattr(self, '_cb_excel') and self._cb_excel.isChecked()
+        excel_dependent = self.config.get("excel_dependent", False)
+
         if self._is_paused: 
-            return
+            # Jeśli nasłuchiwanie jest wyłączone, a tryb Excel ma działać niezależnie 
+            # i jest włączony -> idziemy dalej. W każdym innym przypadku wychodzimy.
+            if not (excel_on and not excel_dependent):
+                return
             
         # Zabezpieczenie przed wielokrotnym wyzwalaniem sygnału przez system (debounce)
         # Ignorujemy zdarzenia występujące częściej niż co 0.2 sekundy
@@ -905,6 +951,12 @@ class MainPanel(QWidget):
         mime = cb.mimeData()
         
         t = cb.text().strip() if mime.hasText() else ""
+        
+        # --- LOGIKA: Tryb Excel ---
+        if excel_on and t:
+            if len(t) >= 2 and t.startswith('"') and t.endswith('"'):
+                t = t[1:-1]
+                
         has_html_table = mime.hasHtml() and "<table" in mime.html().lower()
         
         is_excel_or_table = t and ("\t" in t or has_html_table)
