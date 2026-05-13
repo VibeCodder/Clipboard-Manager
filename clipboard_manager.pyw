@@ -935,13 +935,9 @@ class MainPanel(QWidget):
         excel_dependent = self.config.get("excel_dependent", False)
 
         if self._is_paused: 
-            # Jeśli nasłuchiwanie jest wyłączone, a tryb Excel ma działać niezależnie 
-            # i jest włączony -> idziemy dalej. W każdym innym przypadku wychodzimy.
             if not (excel_on and not excel_dependent):
                 return
             
-        # Zabezpieczenie przed wielokrotnym wyzwalaniem sygnału przez system (debounce)
-        # Ignorujemy zdarzenia występujące częściej niż co 0.2 sekundy
         now = time.time()
         if now - getattr(self, '_last_update', 0) < 0.2:
             return
@@ -958,24 +954,10 @@ class MainPanel(QWidget):
                 t = t[1:-1]
                 
         has_html_table = mime.hasHtml() and "<table" in mime.html().lower()
-        
         is_excel_or_table = t and ("\t" in t or has_html_table)
         
-        # Usunęliśmy sprawdzanie "t != self._last_text", bo teraz reagujemy 
-        # tylko na realne zdarzenie zmiany wywołane przez użytkownika.
-        
-        # PRIORYTET 1: Tabela/Excel
-        if is_excel_or_table:
-            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-            self._save_data()
-            
-        # PRIORYTET 2: Standardowy tekst
-        elif t:
-            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-            self._save_data()
-            
-        # PRIORYTET 3: Obraz
-        elif mime.hasImage():
+        # PRIORYTET 1: Obraz bezpośredni (np. Kopiuj grafikę z przeglądarki, PrintScreen)
+        if mime.hasImage():
             if mime.hasFormat("image/png"):
                 ba = mime.data("image/png")
                 self._boards[self._last_tab].add_item(
@@ -993,6 +975,50 @@ class MainPanel(QWidget):
                         ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
                     )
                     self._save_data()
+
+        # PRIORYTET 2: Pliki z Eksploratora Windows (hasUrls)
+        elif mime.hasUrls():
+            added_image = False
+            # Sprawdzamy wszystkie skopiowane pliki
+            for url in mime.urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    ext = Path(file_path).suffix.lower()
+                    # Jeśli plik ma rozszerzenie graficzne, wczytujemy go
+                    if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                        try:
+                            img = QImage(file_path)
+                            if not img.isNull():
+                                ba = QByteArray()
+                                buf = QBuffer(ba)
+                                buf.open(QBuffer.WriteOnly)
+                                # Zapisujemy jako PNG do bufora, aby zachować standard formatu w aplikacji
+                                img.save(buf, "PNG")
+                                self._boards[self._last_tab].add_item(
+                                    ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
+                                )
+                                added_image = True
+                        except Exception as e:
+                            print(f"Błąd wczytywania pliku obrazu: {e}")
+            
+            # Zapisujemy dane, jeśli dodano chociaż jeden obraz
+            if added_image:
+                self._save_data()
+            elif t:
+                # Jeśli skopiowano pliki, ale żaden nie był obrazem (np. pliki .txt, .pdf), 
+                # dodajemy ich ścieżki jako tekst
+                self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+                self._save_data()
+
+        # PRIORYTET 3: Tabela/Excel
+        elif is_excel_or_table:
+            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+            self._save_data()
+            
+        # PRIORYTET 4: Standardowy tekst
+        elif t:
+            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+            self._save_data()
 
     # ── Tray ────────────────────────────────────────────────────────────────
 
