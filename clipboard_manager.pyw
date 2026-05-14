@@ -953,11 +953,72 @@ class MainPanel(QWidget):
             if len(t) >= 2 and t.startswith('"') and t.endswith('"'):
                 t = t[1:-1]
                 
-        has_html_table = mime.hasHtml() and "<table" in mime.html().lower()
-        is_excel_or_table = t and ("\t" in t or has_html_table)
+        # --- ROZPOZNAWANIE EXCELA I TABEL ---
+        formats = mime.formats()
+        excel_markers = ["biff", "excel", "spreadsheet", "worksheet"]
+        is_excel_app = any(marker in f.lower() for f in formats for marker in excel_markers)
         
-        # PRIORYTET 1: Obraz bezpośredni (np. Kopiuj grafikę z przeglądarki, PrintScreen)
+        html_lower = mime.html().lower() if mime.hasHtml() else ""
+        has_html_table = "<table" in html_lower or "office:excel" in html_lower
+        
+        # Decydujemy, czy to są komórki (tekst/tabela) czy czysty obraz
+        is_excel_cells = t and (is_excel_app or has_html_table or "\t" in t)
+
+        # PRIORYTET 1: Komórki Excela / Tabele (zawsze jako tekst)
+        if is_excel_cells:
+            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+            self._save_data()
+            return  # Kończymy, aby nie wejść w zapisywanie obrazu
+
+        # PRIORYTET 2: Obrazy (Przeglądarka, PrintScreen, zdjęcia wklejone w Excela)
         if mime.hasImage():
+            if mime.hasFormat("image/png"):
+                ba = mime.data("image/png")
+                self._boards[self._last_tab].add_item(
+                    ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
+                )
+            else:
+                img = cb.image()
+                if not img.isNull():
+                    ba = QByteArray()
+                    buf = QBuffer(ba)
+                    buf.open(QBuffer.WriteOnly)
+                    img.save(buf, "PNG")
+                    self._boards[self._last_tab].add_item(
+                        ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
+                    )
+            self._save_data()
+            return
+
+        # PRIORYTET 3: Pliki z Eksploratora
+        if mime.hasUrls():
+            added = False
+            for url in mime.urls():
+                if url.isLocalFile():
+                    fp = url.toLocalFile()
+                    ext = Path(fp).suffix.lower()
+                    if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                        img = QImage(fp)
+                        if not img.isNull():
+                            ba = QByteArray(); b = QBuffer(ba); b.open(QBuffer.WriteOnly)
+                            img.save(b, "PNG")
+                            self._boards[self._last_tab].add_item(
+                                ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
+                            )
+                            added = True
+            if added: 
+                self._save_data()
+                return
+            elif t:
+                self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+                self._save_data()
+                return
+
+        # PRIORYTET 4: Zwykły tekst
+        if t:
+            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+            self._save_data()
+            return
             if mime.hasFormat("image/png"):
                 ba = mime.data("image/png")
                 self._boards[self._last_tab].add_item(
@@ -976,15 +1037,13 @@ class MainPanel(QWidget):
                     )
                     self._save_data()
 
-        # PRIORYTET 2: Pliki z Eksploratora Windows (hasUrls)
+        # PRIORYTET 3: Pliki z Eksploratora Windows (hasUrls)
         elif mime.hasUrls():
             added_image = False
-            # Sprawdzamy wszystkie skopiowane pliki
             for url in mime.urls():
                 if url.isLocalFile():
                     file_path = url.toLocalFile()
                     ext = Path(file_path).suffix.lower()
-                    # Jeśli plik ma rozszerzenie graficzne, wczytujemy go
                     if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
                         try:
                             img = QImage(file_path)
@@ -992,7 +1051,6 @@ class MainPanel(QWidget):
                                 ba = QByteArray()
                                 buf = QBuffer(ba)
                                 buf.open(QBuffer.WriteOnly)
-                                # Zapisujemy jako PNG do bufora, aby zachować standard formatu w aplikacji
                                 img.save(buf, "PNG")
                                 self._boards[self._last_tab].add_item(
                                     ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
@@ -1001,19 +1059,11 @@ class MainPanel(QWidget):
                         except Exception as e:
                             print(f"Błąd wczytywania pliku obrazu: {e}")
             
-            # Zapisujemy dane, jeśli dodano chociaż jeden obraz
             if added_image:
                 self._save_data()
             elif t:
-                # Jeśli skopiowano pliki, ale żaden nie był obrazem (np. pliki .txt, .pdf), 
-                # dodajemy ich ścieżki jako tekst
                 self._boards[self._last_tab].add_item(ClipItem("text", text=t))
                 self._save_data()
-
-        # PRIORYTET 3: Tabela/Excel
-        elif is_excel_or_table:
-            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-            self._save_data()
             
         # PRIORYTET 4: Standardowy tekst
         elif t:
