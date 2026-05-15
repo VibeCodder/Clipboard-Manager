@@ -939,66 +939,29 @@ class MainPanel(QWidget):
                 return
             
         now = time.time()
-        if now - getattr(self, '_last_update', 0) < 0.2:
+        if now - getattr(self, '_last_update', 0) < 0.1:
             return
-        self._last_update = now
-        
+            
         cb = QGuiApplication.clipboard()
         mime = cb.mimeData()
-        
         t = cb.text().strip() if mime.hasText() else ""
-        
-        # --- LOGIKA: Tryb Excel ---
-        if excel_on and t:
-            if len(t) >= 2 and t.startswith('"') and t.endswith('"'):
-                t = t[1:-1]
-                
-        # --- ROZPOZNAWANIE EXCELA I TABEL ---
-        # --- ROZPOZNAWANIE APLIKACJI BIUROWYCH (Excel, PowerPoint, Word) ---
+
+        # --- WYKRYWANIE FORMATÓW ---
         formats = mime.formats()
         f_list = [f.lower() for f in formats]
         
-        # Znaczniki dla Excela i PowerPointa
+        # Czy to aplikacja Office (Excel, PPT, Word, Web Excel/Sheets)?
         office_markers = ["biff", "excel", "spreadsheet", "powerpnt", "presentation", "office"]
         is_office_app = any(m in f for f in f_list for m in office_markers)
         
-        # Sprawdzamy metadane w HTML (PowerPoint często dodaje specyficzne tagi)
+        # Czy to tabela lub metadane Office w HTML?
         html_content = mime.html().lower() if mime.hasHtml() else ""
-        has_office_html = any(x in html_content for x in ["<table", "office:excel", "powerpoint", "urn:schemas-microsoft-com:office"])
+        has_office_html = any(x in html_content for x in ["office:excel", "powerpoint", "urn:schemas-microsoft-com:office", "data-sheets-value"])
+        is_table = "\t" in t or "<table" in html_content or "google-sheets" in html_content
+        
+        is_office_or_table = is_office_app or has_office_html or is_table
 
-        # Decydujemy: Czy traktować to jako tekst/obiekt tekstowy zamiast obrazu?
-        # Warunek: Jest dostępny tekst ORAZ (pochodzi z Office'a LUB ma strukturę tabeli LUB zawiera tabulatory)
-        is_text_priority = t and (is_office_app or has_office_html or "\t" in t)
-
-        # PRIORYTET 1: Tekst z Office (Excel, PowerPoint) i Tabele
-        # Aplikacje te zawsze dodają obraz "na wszelki wypadek", który musimy zignorować.
-        if is_text_priority:
-            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-            self._save_data()
-            return 
-
-        # PRIORYTET 2: Obrazy (Przeglądarka, PrintScreen, zdjęcia)
-        if mime.hasImage():
-            # ... (tutaj zostaje reszta Twojego kodu bez zmian)
-            if mime.hasFormat("image/png"):
-                ba = mime.data("image/png")
-                self._boards[self._last_tab].add_item(
-                    ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
-                )
-            else:
-                img = cb.image()
-                if not img.isNull():
-                    ba = QByteArray()
-                    buf = QBuffer(ba)
-                    buf.open(QBuffer.WriteOnly)
-                    img.save(buf, "PNG")
-                    self._boards[self._last_tab].add_item(
-                        ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
-                    )
-            self._save_data()
-            return
-
-        # PRIORYTET 3: Pliki z Eksploratora
+        # --- PRIORYTET 1: Pliki z Eksploratora (np. kopiowanie zdjęć jako pliki) ---
         if mime.hasUrls():
             added = False
             for url in mime.urls():
@@ -1010,73 +973,44 @@ class MainPanel(QWidget):
                         if not img.isNull():
                             ba = QByteArray(); b = QBuffer(ba); b.open(QBuffer.WriteOnly)
                             img.save(b, "PNG")
-                            self._boards[self._last_tab].add_item(
-                                ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
-                            )
+                            self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
                             added = True
-            if added: 
+            if added:
                 self._save_data()
-                return
-            elif t:
-                self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-                self._save_data()
+                self._last_update = now
                 return
 
-        # PRIORYTET 4: Zwykły tekst
+        # --- PRIORYTET 2: Obrazy (Przeglądarka, Photoshop, PrintScreen) ---
+        # Wyjątek: Jeśli to Office LUB tabela, ignorujemy podgląd obrazu (aby priorytetyzować tekst komórek),
+        # chyba że nie ma w ogóle tekstu (wtedy kopiujemy jako obraz, np. skopiowany wykres z Excela).
+        if mime.hasImage() and not (is_office_or_table and bool(t)):
+            if mime.hasFormat("image/png"):
+                ba = mime.data("image/png")
+            else:
+                img = cb.image()
+                if img.isNull(): return
+                ba = QByteArray(); buf = QBuffer(ba); buf.open(QBuffer.WriteOnly); img.save(buf, "PNG")
+            
+            self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
+            self._save_data()
+            self._last_update = now
+            return
+
+        # --- PRIORYTET 3: Tekst (Office, Tabele, Zwykły tekst) ---
         if t:
+            # Obróbka dla trybu Excel
+            if excel_on and len(t) >= 2 and t.startswith('"') and t.endswith('"'):
+                t = t[1:-1]
+
+            # Anty-miganie dla tekstu (Excel generuje wiele zdarzeń dla tego samego tekstu)
+            if getattr(self, '_last_processed', None) == t and (now - getattr(self, '_last_update', 0) < 1.0):
+                return
+            
+            self._last_processed = t
+            self._last_update = now
             self._boards[self._last_tab].add_item(ClipItem("text", text=t))
             self._save_data()
             return
-            if mime.hasFormat("image/png"):
-                ba = mime.data("image/png")
-                self._boards[self._last_tab].add_item(
-                    ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
-                )
-                self._save_data()
-            else:
-                img = cb.image()
-                if not img.isNull():
-                    ba = QByteArray()
-                    buf = QBuffer(ba)
-                    buf.open(QBuffer.WriteOnly)
-                    img.save(buf, "PNG")
-                    self._boards[self._last_tab].add_item(
-                        ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
-                    )
-                    self._save_data()
-
-        # PRIORYTET 3: Pliki z Eksploratora Windows (hasUrls)
-        elif mime.hasUrls():
-            added_image = False
-            for url in mime.urls():
-                if url.isLocalFile():
-                    file_path = url.toLocalFile()
-                    ext = Path(file_path).suffix.lower()
-                    if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
-                        try:
-                            img = QImage(file_path)
-                            if not img.isNull():
-                                ba = QByteArray()
-                                buf = QBuffer(ba)
-                                buf.open(QBuffer.WriteOnly)
-                                img.save(buf, "PNG")
-                                self._boards[self._last_tab].add_item(
-                                    ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode())
-                                )
-                                added_image = True
-                        except Exception as e:
-                            print(f"Błąd wczytywania pliku obrazu: {e}")
-            
-            if added_image:
-                self._save_data()
-            elif t:
-                self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-                self._save_data()
-            
-        # PRIORYTET 4: Standardowy tekst
-        elif t:
-            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-            self._save_data()
 
     # ── Tray ────────────────────────────────────────────────────────────────
 
