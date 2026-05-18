@@ -926,11 +926,16 @@ class MainPanel(QWidget):
 
     def _setup_clipboard(self):
         self._last_update = 0  # Zmienna do zapobiegania spamowi zdarzeń
+        self._ignore_clipboard = False  # Flaga: blokuje _poll_clip gdy sami piszemy do schowka
         cb = QGuiApplication.clipboard()
         # Zamiast QTimer, używamy sygnału systemowego - reaguje na sam fakt "Kopiuj"
         cb.dataChanged.connect(self._poll_clip)
 
     def _poll_clip(self):
+        # Jeśli sami właśnie zapisaliśmy do schowka (Excel mode), ignorujemy to zdarzenie
+        if getattr(self, '_ignore_clipboard', False):
+            return
+
         excel_on = hasattr(self, '_cb_excel') and self._cb_excel.isChecked()
         excel_dependent = self.config.get("excel_dependent", False)
 
@@ -997,6 +1002,7 @@ class MainPanel(QWidget):
             return
         import pyperclip
         # --- PRIORYTET 3: Tekst (Office, Tabele, Zwykły tekst) ---
+        # --- PRIORYTET 3: Tekst (Office, Tabele, Zwykły tekst) ---
         if t:
             # Obróbka dla trybu Excel
             if excel_on:
@@ -1013,6 +1019,8 @@ class MainPanel(QWidget):
             self._boards[self._last_tab].add_item(ClipItem("text", text=t))
             self._save_data()
             return
+            
+            
 
     # ── Tray ────────────────────────────────────────────────────────────────
 
