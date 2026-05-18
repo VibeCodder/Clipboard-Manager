@@ -995,12 +995,14 @@ class MainPanel(QWidget):
             self._save_data()
             self._last_update = now
             return
-
+        import pyperclip
         # --- PRIORYTET 3: Tekst (Office, Tabele, Zwykły tekst) ---
         if t:
             # Obróbka dla trybu Excel
-            if excel_on and len(t) >= 2 and t.startswith('"') and t.endswith('"'):
-                t = t[1:-1]
+            if excel_on:
+                t = t.strip('"')
+                import threading
+                threading.Thread(target=pyperclip.copy, args=(t,), daemon=True).start()
 
             # Anty-miganie dla tekstu (Excel generuje wiele zdarzeń dla tego samego tekstu)
             if getattr(self, '_last_processed', None) == t and (now - getattr(self, '_last_update', 0) < 1.0):
