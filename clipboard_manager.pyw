@@ -1000,15 +1000,17 @@ class MainPanel(QWidget):
             self._save_data()
             self._last_update = now
             return
-        import pyperclip
-        # --- PRIORYTET 3: Tekst (Office, Tabele, Zwykły tekst) ---
         # --- PRIORYTET 3: Tekst (Office, Tabele, Zwykły tekst) ---
         if t:
             # Obróbka dla trybu Excel
             if excel_on:
                 t = t.strip('"')
-                import threading
-                threading.Thread(target=pyperclip.copy, args=(t,), daemon=True).start()
+                # Blokujemy polling PRZED zapisem do schowka, żeby nie wpaść w pętlę
+                self._ignore_clipboard = True
+                try:
+                    QGuiApplication.clipboard().setText(t)
+                finally:
+                    QTimer.singleShot(150, lambda: setattr(self, '_ignore_clipboard', False))
 
             # Anty-miganie dla tekstu (Excel generuje wiele zdarzeń dla tego samego tekstu)
             if getattr(self, '_last_processed', None) == t and (now - getattr(self, '_last_update', 0) < 1.0):
