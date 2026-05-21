@@ -12,8 +12,9 @@ if sys.platform == "win32":
     import ctypes
     hwnd = ctypes.windll.kernel32.GetConsoleWindow()
     if hwnd:
+        # Uruchomiono przez python.exe (z konsolą) — restart przez pythonw.exe
         pythonw = sys.executable.replace("python.exe", "pythonw.exe")
-        if os.path.exists(pythonw):
+        if "pythonw" not in sys.executable.lower() and os.path.exists(pythonw):
             import subprocess
             subprocess.Popen([pythonw] + sys.argv, creationflags=0x08000000)
             sys.exit(0)
@@ -46,6 +47,7 @@ DEFAULT_CONFIG = {
     "bar_height":   300,
     "panel_width":  820,
     "excel_dependent": False,
+    "show_at_cursor": True,
 }
 
 # ─── Palette ──────────────────────────────────────────────────────────────────
@@ -252,6 +254,29 @@ QMenu {{
 QMenu::item {{ padding: 6px 20px; border-radius: 4px; }}
 QMenu::item:selected {{ background: {C['card_h']}; color: {C['acc_glow']}; }}
 QMenu::separator {{ height: 1px; background: {C['border']}; margin: 4px 8px; }}
+
+QCheckBox {{
+    color: {C['t1']};
+    spacing: 8px;
+    font-size: 13px;
+}}
+QCheckBox::indicator {{
+    width: 16px; height: 16px;
+    background: {C['card']};
+    border: 1px solid {C['border']};
+    border-radius: 4px;
+}}
+QCheckBox::indicator:hover {{
+    border-color: {C['acc']};
+}}
+QCheckBox::indicator:checked {{
+    background: {C['acc']};
+    border-color: {C['acc']};
+}}
+QCheckBox::indicator:checked:hover {{
+    background: {C['acc_glow']};
+    border-color: {C['acc_glow']};
+}}
 """
 
 # ─── Data model ───────────────────────────────────────────────────────────────
@@ -339,7 +364,9 @@ class EditDialog(QDialog):
     def __init__(self, item: ClipItem, parent=None):
         super().__init__(parent)
         self.item = item
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
+        self.setWindowModality(Qt.NonModal)
         self.setMinimumWidth(420); self.setStyleSheet(SS)
         lay = QVBoxLayout(self); lay.setContentsMargins(20,20,20,20); lay.setSpacing(10)
         t = QLabel("Edit Clip"); t.setStyleSheet(f"font-size:15px;font-weight:600;")
@@ -373,7 +400,9 @@ class SettingsDialog(QDialog):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self.cfg = cfg.copy()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, False)
+        self.setWindowModality(Qt.NonModal)
         self.setMinimumWidth(400); self.setStyleSheet(SS)
         lay = QVBoxLayout(self); lay.setContentsMargins(20,20,20,20); lay.setSpacing(14)
 
@@ -399,9 +428,14 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._note("Bottom Bar spans full width, anchored to the bottom edge."))
         lay.addWidget(self._sep())
 
+        self.cb_cursor = QCheckBox("Show panel at mouse cursor position")
+        self.cb_cursor.setChecked(cfg.get("show_at_cursor", True))
+        lay.addWidget(self.cb_cursor)
+        lay.addWidget(self._note("When enabled, the panel appears where your cursor is. When disabled, opens in the bottom-right corner."))
+        lay.addWidget(self._sep())
+
         self.cb_excel_dep = QCheckBox("Excel mode depends from 'works' mode")
         self.cb_excel_dep.setChecked(cfg.get("excel_dependent", False))
-        self.cb_excel_dep.setStyleSheet(f"color:{C['t1']}; spacing: 8px;")
         lay.addWidget(self.cb_excel_dep)
         lay.addWidget(self._note("Check if Excel mode should be paused when clipboard listening is paused. Uncheck (default) for cleanup to always run."))
         lay.addWidget(self._sep())
@@ -435,6 +469,7 @@ class SettingsDialog(QDialog):
         self.cfg["panel_width"]  = self.spin_pw.value()
         self.cfg["bar_height"]   = self.spin_bh.value()
         self.cfg["excel_dependent"] = self.cb_excel_dep.isChecked()
+        self.cfg["show_at_cursor"]  = self.cb_cursor.isChecked()
         self.accept()
 
     def get(self): return self.cfg
@@ -1041,26 +1076,53 @@ class MainPanel(QWidget):
     def hide_to_tray(self): self.hide()
 
     def show_panel(self):
-        if not self.isVisible(): self._apply_geometry()
-        self.show(); self.raise_(); self.activateWindow()
+        self._apply_geometry()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        # Wyczyszczenie fokusu z pola wyszukiwania i przekazanie go na główne okno.
+        # Dzięki temu wciskany skrót (`) nie wpisze się do wyszukiwarki.
+        self._search.clearFocus()
+        self.setFocus()
 
     def _apply_geometry(self):
-        sc = QGuiApplication.primaryScreen().availableGeometry()
-        mode = self.config.get("layout_mode","panel")
-        if mode == "bar":
-            bh = self.config.get("bar_height",300)
-            self.setMinimumSize(sc.width(),bh); self.setMaximumSize(sc.width(),bh)
-            self.move(sc.x(), sc.y()+sc.height()-bh)
+        from PySide6.QtGui import QCursor
+        
+        show_at_cursor = self.config.get("show_at_cursor", True)
+        
+        # 1. Wybór odpowiedniego ekranu NA SAMYM POCZĄTKU
+        if show_at_cursor:
+            cursor_pt = QCursor.pos()
+            screen = QGuiApplication.screenAt(cursor_pt) or QGuiApplication.primaryScreen()
         else:
-            ph=self.config.get("panel_height",560); pw=self.config.get("panel_width",820)
-            self.setMinimumSize(400,300); self.setMaximumSize(16777215,16777215)
-            self.resize(pw,ph)
-            self.move(sc.x()+sc.width()-pw-20, sc.y()+sc.height()-ph-60)
+            screen = QGuiApplication.primaryScreen()
+            
+        sc = screen.availableGeometry()
+        mode = self.config.get("layout_mode", "panel")
+        
+        if mode == "bar":
+            bh = self.config.get("bar_height", 300)
+            self.setMinimumSize(sc.width(), bh); self.setMaximumSize(sc.width(), bh)
+            self.setGeometry(sc.x(), sc.y() + sc.height() - bh, sc.width(), bh)
+        else:
+            ph = self.config.get("panel_height", 560); pw = self.config.get("panel_width", 820)
+            self.setMinimumSize(400, 300); self.setMaximumSize(16777215, 16777215)
+            
+            if show_at_cursor:
+                mx = cursor_pt.x()
+                my = cursor_pt.y()
+                x = max(sc.x(), min(mx - pw // 2, sc.x() + sc.width()  - pw))
+                y = max(sc.y(), min(my - ph // 2, sc.y() + sc.height() - ph))
+                self.setGeometry(x, y, pw, ph)
+            else:
+                # Sztywna pozycja: prawy dolny róg wybranego (Głównego) ekranu
+                self.setGeometry(sc.x() + sc.width() - pw - 20, sc.y() + sc.height() - ph - 60, pw, ph)
 
     # ── Settings ─────────────────────────────────────────────────────────
 
     def _settings(self):
         dlg = SettingsDialog(self.config, self)
+        dlg.setParent(self, Qt.Tool | Qt.FramelessWindowHint)
         if dlg.exec():
             old_key = self.config.get("hotkey")
             self.config = dlg.get(); self._save_cfg()
@@ -1083,6 +1145,7 @@ class MainPanel(QWidget):
                 except: pass
             self._hk_triggered = False
             def _fire(): self._hk_triggered = True
+            # suppress=False - klawisz działa normalnie w systemie
             self._hk_id = kb.add_hotkey(self.config.get("hotkey","`"), _fire, suppress=False)
         except Exception as e: print("hotkey:",e); self._hk_id=None
         if not hasattr(self,"_hk_timer"):
@@ -1102,6 +1165,10 @@ class MainPanel(QWidget):
 
     def eventFilter(self, obj, event):
         if event.type()==QEvent.MouseButtonPress and self.isVisible():
+            # Zapobiega znikaniu: jeśli kliknięto w jakiekolwiek inne okno naszej aplikacji (np. Ustawienia)
+            if QApplication.widgetAt(event.globalPosition().toPoint()) is not None:
+                return super().eventFilter(obj, event)
+                
             if not self.geometry().contains(event.globalPosition().toPoint()):
                 self.hide_to_tray()
         return super().eventFilter(obj, event)
@@ -1115,6 +1182,24 @@ class MainPanel(QWidget):
         if e.buttons()==Qt.LeftButton and self._drag_pos:
             self.move(e.globalPosition().toPoint()-self._drag_pos)
     def _drag_release(self, e): self._drag_pos=None
+
+    # ── Keyboard ─────────────────────────────────────────────────────────
+
+    def keyPressEvent(self, event):
+        # Pochłaniamy wciśnięcie klawisza skrótu, żeby Windows nie odtwarzał
+        # dźwięku błędu (ding) gdy okno nie ma aktywnego pola tekstowego.
+        hk = self.config.get("hotkey", "`")
+        if event.text() == hk:
+            event.accept()
+            return
+            
+        # Opcjonalnie: zamykanie okna klawiszem ESC
+        if event.key() == Qt.Key_Escape:
+            self.hide_to_tray()
+            event.accept()
+            return
+            
+        super().keyPressEvent(event)
 
 
 # ─── Entry ───────────────────────────────────────────────────────────────────
