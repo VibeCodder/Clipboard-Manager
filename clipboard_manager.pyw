@@ -941,20 +941,26 @@ class MainPanel(QWidget):
     # ZAKTUALIZOWANA FUNKCJA: Wklejanie do schowka z zachowaniem przezroczystości
     def _on_item_click(self, item):
         cb = QGuiApplication.clipboard()
-        if item.ctype == "text":
-            cb.setText(item.text)
-            self._last_text = item.text.strip()
-        elif item.ctype == "image" and item.img_b64:
-            ba = QByteArray(base64.b64decode(item.img_b64))
-            img = QImage.fromData(ba)
-            if not img.isNull():
-                mime = QMimeData()
-                mime.setImageData(img)
-                # Wymuszamy dodanie surowego formatu PNG, by nie utracić kanału alpha!
-                mime.setData("image/png", ba)
-                cb.setMimeData(mime)
-                self._last_img = (ba.size(), "png") # Zabezpieczenie przed pętlą kopiowania
-                self._last_text = ""
+        # Blokujemy nasłuchiwanie schowka, żeby kliknięcie nie dodało elementu po raz drugi
+        self._ignore_clipboard = True
+        try:
+            if item.ctype == "text":
+                cb.setText(item.text)
+                self._last_text = item.text.strip()
+                self._last_processed = item.text.strip()
+            elif item.ctype == "image" and item.img_b64:
+                ba = QByteArray(base64.b64decode(item.img_b64))
+                img = QImage.fromData(ba)
+                if not img.isNull():
+                    mime = QMimeData()
+                    mime.setImageData(img)
+                    # Wymuszamy dodanie surowego formatu PNG, by nie utracić kanału alpha!
+                    mime.setData("image/png", ba)
+                    cb.setMimeData(mime)
+                    self._last_img = (ba.size(), "png")
+                    self._last_text = ""
+        finally:
+            QTimer.singleShot(200, lambda: setattr(self, '_ignore_clipboard', False))
         self.hide_to_tray()
 
     # ── Clipboard ───────────────────────────────────────────────────────────
@@ -1039,22 +1045,34 @@ class MainPanel(QWidget):
         if t:
             # Obróbka dla trybu Excel
             if excel_on:
-                t = t.strip('"')
-                # Blokujemy polling PRZED zapisem do schowka, żeby nie wpaść w pętlę
-                self._ignore_clipboard = True
-                try:
-                    QGuiApplication.clipboard().setText(t)
-                finally:
-                    QTimer.singleShot(150, lambda: setattr(self, '_ignore_clipboard', False))
+                cleaned = t.strip('"')
+                # Anty-miganie dla tekstu (Excel generuje wiele zdarzeń dla tego samego tekstu)
+                if getattr(self, '_last_processed', None) == cleaned and (now - getattr(self, '_last_update', 0) < 1.0):
+                    return
 
-            # Anty-miganie dla tekstu (Excel generuje wiele zdarzeń dla tego samego tekstu)
-            if getattr(self, '_last_processed', None) == t and (now - getattr(self, '_last_update', 0) < 1.0):
-                return
-            
-            self._last_processed = t
-            self._last_update = now
-            self._boards[self._last_tab].add_item(ClipItem("text", text=t))
-            self._save_data()
+                # Odkładamy setText na następny tick pętli zdarzeń.
+                # Dzięki temu Excel zdąży dokończyć własne operacje na schowku,
+                # a my nadpiszemy go już czystym tekstem (bez cudzysłowów).
+                def _deferred_set(text=cleaned):
+                    self._ignore_clipboard = True
+                    QGuiApplication.clipboard().setText(text)
+                    QTimer.singleShot(200, lambda: setattr(self, '_ignore_clipboard', False))
+
+                QTimer.singleShot(0, _deferred_set)
+
+                self._last_processed = cleaned
+                self._last_update = now
+                self._boards[self._last_tab].add_item(ClipItem("text", text=cleaned))
+                self._save_data()
+            else:
+                # Anty-miganie dla tekstu (Excel generuje wiele zdarzeń dla tego samego tekstu)
+                if getattr(self, '_last_processed', None) == t and (now - getattr(self, '_last_update', 0) < 1.0):
+                    return
+
+                self._last_processed = t
+                self._last_update = now
+                self._boards[self._last_tab].add_item(ClipItem("text", text=t))
+                self._save_data()
             return
             
             
