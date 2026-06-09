@@ -3,7 +3,7 @@
 Clipboard Manager — clean rewrite matching the reference UI.
 """
 
-import sys, json, os, time, base64
+import sys, json, os, time, base64, csv, io
 from pathlib import Path
 from datetime import datetime
 
@@ -278,6 +278,46 @@ QCheckBox::indicator:checked:hover {{
     border-color: {C['acc_glow']};
 }}
 """
+
+# ─── Excel clipboard cleaner ─────────────────────────────────────────────────
+
+def _excel_clean(text: str) -> str:
+    """
+    Usuwa cudzysłowy dodawane przez Excela do komórek zawierających nowe linie.
+
+    Excel koduje skopiowany zakres jako TSV (tabulatory między kolumnami,
+    nowe linie między wierszami). Komórki zawierające znak nowej linii lub
+    tabulatora są dodatkowo opakowane w cudzysłowy, a wewnętrzne cudzysłowy
+    są podwajane (""). Przykład dla jednej komórki z nową linią:
+        "linia 1\nlinia 2"
+    Dla zakresu:
+        "kom A1\nnowa linia"\tkom B1\n"kom A2\nnowa"\tkom B2
+
+    Strategia:
+    1. Spróbuj sparsować jako TSV przez csv.reader (obsługuje RFC-4180).
+    2. Jeśli jest tylko jedna komórka — zwróć jej wartość (cudzysłowy znikają).
+    3. Jeśli jest wiele komórek — złóż z powrotem tabulatorami i nowym liniami,
+       ale już bez zewnętrznych cudzysłowów wokół każdej komórki.
+    4. Fallback: jeśli csv.reader zawiedzie, użyj starego strip('"').
+    """
+    try:
+        reader = csv.reader(io.StringIO(text), delimiter='\t', quotechar='"',
+                            quoting=csv.QUOTE_MINIMAL, skipinitialspace=False)
+        rows = list(reader)
+        # Odrzuć ostatni pusty wiersz który csv dodaje gdy tekst kończy się \n
+        if rows and rows[-1] == []:
+            rows = rows[:-1]
+        if not rows:
+            return text.strip('"')
+        if len(rows) == 1 and len(rows[0]) == 1:
+            # Pojedyncza komórka
+            return rows[0][0]
+        # Wiele komórek — złóż z powrotem jako TSV bez cudzysłowów
+        return "\n".join("\t".join(cell for cell in row) for row in rows)
+    except Exception:
+        # Fallback — stare zachowanie
+        return text.strip('"')
+
 
 # ─── Data model ───────────────────────────────────────────────────────────────
 
@@ -1019,10 +1059,12 @@ class MainPanel(QWidget):
                         if not img.isNull():
                             ba = QByteArray(); b = QBuffer(ba); b.open(QBuffer.WriteOnly)
                             img.save(b, "PNG")
-                            self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
+                            if not self._is_paused:
+                                self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
                             added = True
             if added:
-                self._save_data()
+                if not self._is_paused:
+                    self._save_data()
                 self._last_update = now
                 return
 
@@ -1037,15 +1079,16 @@ class MainPanel(QWidget):
                 if img.isNull(): return
                 ba = QByteArray(); buf = QBuffer(ba); buf.open(QBuffer.WriteOnly); img.save(buf, "PNG")
             
-            self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
-            self._save_data()
+            if not self._is_paused:
+                self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
+                self._save_data()
             self._last_update = now
             return
         # --- PRIORYTET 3: Tekst (Office, Tabele, Zwykły tekst) ---
         if t:
             # Obróbka dla trybu Excel
             if excel_on:
-                cleaned = t.strip('"')
+                cleaned = _excel_clean(t)
                 # Anty-miganie dla tekstu (Excel generuje wiele zdarzeń dla tego samego tekstu)
                 if getattr(self, '_last_processed', None) == cleaned and (now - getattr(self, '_last_update', 0) < 1.0):
                     return
@@ -1062,8 +1105,11 @@ class MainPanel(QWidget):
 
                 self._last_processed = cleaned
                 self._last_update = now
-                self._boards[self._last_tab].add_item(ClipItem("text", text=cleaned))
-                self._save_data()
+
+                # Dodaj kartę TYLKO jeśli program nie jest zatrzymany
+                if not self._is_paused:
+                    self._boards[self._last_tab].add_item(ClipItem("text", text=cleaned))
+                    self._save_data()
             else:
                 # Anty-miganie dla tekstu (Excel generuje wiele zdarzeń dla tego samego tekstu)
                 if getattr(self, '_last_processed', None) == t and (now - getattr(self, '_last_update', 0) < 1.0):
