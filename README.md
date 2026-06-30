@@ -1,11 +1,13 @@
 # Clipboard Manager
 It's a free and open source app made in Claude AI and Gemini that makes your life easier by managing all of your's clipboard data into switchable on-screen board.
 <br>
-PASSWORD: imgConverterWEBP!AVIF
 Before running the program you must run this command to install required packages:<br>
 ```
 pip install keyboard PySide6
 ```
+  
+PASSWORD: imgConverterWEBP!AVIF
+
 
 <img width="512" height="512" alt="clipboard-manager-icon-smaller" src="https://github.com/user-attachments/assets/209e0af0-4da1-4937-99e7-e4523e8a487d" />
 <br>
