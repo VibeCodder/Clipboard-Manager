@@ -5,8 +5,6 @@ Before running the program you must run this command to install required package
 ```
 pip install keyboard PySide6
 ```
-  
-PASSWORD: imgConverterWEBP!AVIF
 
 
 <img width="512" height="512" alt="clipboard-manager-icon-smaller" src="https://github.com/user-attachments/assets/6824cdfc-8b9a-449b-9dac-3f3ffb28d514" />
