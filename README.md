@@ -6,9 +6,6 @@ Before running the program you must run this command to install required package
 pip install keyboard PySide6
 ```
 
-<img width="1328" height="1328" alt="clipboard manager" src="https://github.com/user-attachments/assets/e8cb0885-7b75-4c6f-a73c-9632e3801ecf" />
-
-
 
 ### Once starting the app it will be running in the background.
 ### Tap <code>Ctrl + `</code> button (by default) to bring panel up. The same key pressed again hides it. Key can be changed in settings.
