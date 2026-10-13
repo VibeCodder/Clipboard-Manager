@@ -25,13 +25,13 @@ from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QScrollArea, QLineEdit, QSystemTrayIcon, QMenu, QDialog,
     QMessageBox, QInputDialog, QFrame, QSizePolicy, QTextEdit, QSpinBox,
-    QLayout, QCheckBox,
+    QLayout, QCheckBox, QRadioButton, QButtonGroup, QGraphicsOpacityEffect,
 )
 # DODANO QMimeData DO IMPORTÓW PONIŻEJ
-from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QEvent, QBuffer, QSize, QRect, QPoint, QMimeData
+from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QEvent, QBuffer, QSize, QRect, QPoint, QPointF, QMimeData
 from PySide6.QtGui import (
     QColor, QFont, QIcon, QPixmap, QPainter, QImage,
-    QGuiApplication, QKeySequence, QShortcut,
+    QGuiApplication, QKeySequence, QShortcut, QDrag,
 )
 
 # ─── Config ───────────────────────────────────────────────────────────────────
@@ -48,6 +48,7 @@ DEFAULT_CONFIG = {
     "panel_width":  820,
     "excel_dependent": False,
     "show_at_cursor": True,
+    "new_card_position": "top",
 }
 
 # ─── Palette ──────────────────────────────────────────────────────────────────
@@ -287,6 +288,26 @@ QCheckBox::indicator:checked:hover {{
     background: {C['acc_glow']};
     border-color: {C['acc_glow']};
 }}
+QRadioButton {{
+    color: {C['t1']};
+    spacing: 8px;
+    font-size: 13px;
+}}
+QRadioButton::indicator {{
+    width: 16px; height: 16px;
+    background: {C['card']};
+    border: 1px solid {C['border']};
+    border-radius: 9px;
+}}
+QRadioButton::indicator:hover {{
+    border-color: {C['acc']};
+}}
+QRadioButton::indicator:checked {{
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+                stop:0 {C['acc']}, stop:0.45 {C['acc']},
+                stop:0.55 {C['card']}, stop:1 {C['card']});
+    border-color: {C['acc']};
+}}
 """
 
 # ─── Excel clipboard cleaner ─────────────────────────────────────────────────
@@ -492,6 +513,16 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._note("When enabled, the panel appears where your cursor is. When disabled, opens in the bottom-right corner."))
         lay.addWidget(self._sep())
 
+        lay.addWidget(self._lbl("New cards position:"))
+        self.rb_top = QRadioButton("At the top (within its category — pinned / unpinned)")
+        self.rb_bottom = QRadioButton("At the bottom (within its category — pinned / unpinned)")
+        self._pos_group = QButtonGroup(self)
+        self._pos_group.addButton(self.rb_top); self._pos_group.addButton(self.rb_bottom)
+        (self.rb_bottom if cfg.get("new_card_position", "top") == "bottom" else self.rb_top).setChecked(True)
+        lay.addWidget(self.rb_top); lay.addWidget(self.rb_bottom)
+        lay.addWidget(self._note("Where newly copied or created cards are placed. Pinned cards always stay above unpinned ones."))
+        lay.addWidget(self._sep())
+
         self.cb_excel_dep = QCheckBox("Excel mode depends from 'works' mode")
         self.cb_excel_dep.setChecked(cfg.get("excel_dependent", False))
         lay.addWidget(self.cb_excel_dep)
@@ -528,6 +559,7 @@ class SettingsDialog(QDialog):
         self.cfg["bar_height"]   = self.spin_bh.value()
         self.cfg["excel_dependent"] = self.cb_excel_dep.isChecked()
         self.cfg["show_at_cursor"]  = self.cb_cursor.isChecked()
+        self.cfg["new_card_position"] = "bottom" if self.rb_bottom.isChecked() else "top"
         self.accept()
 
     def get(self): return self.cfg
@@ -536,12 +568,60 @@ class SettingsDialog(QDialog):
 # ─── Clip Card ────────────────────────────────────────────────────────────────
 
 CARD_W = 280
+DRAG_MIME = "application/x-clipcard-reorder"
+
+
+class DragHandle(QWidget):
+    """Uchwyt (6 kropek) do przeciągania karty."""
+    drag_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(16, 28)
+        self.setCursor(Qt.OpenHandCursor)
+        self.setToolTip("Przeciągnij, aby zmienić kolejność")
+        self._press = None
+        self._hover = False
+
+    def enterEvent(self, e):
+        self._hover = True; self.update(); super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False; self.update(); super().leaveEvent(e)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(C['t1'] if self._hover else C['t3']))
+        cx, cy = self.width() / 2, self.height() / 2
+        for dx in (-3, 3):
+            for dy in (-6, 0, 6):
+                p.drawEllipse(QPointF(cx + dx, cy + dy), 1.6, 1.6)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._press = e.position().toPoint()
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        if self._press is not None and (e.buttons() & Qt.LeftButton):
+            if (e.position().toPoint() - self._press).manhattanLength() >= QApplication.startDragDistance():
+                self._press = None
+                self.drag_requested.emit()
+        e.accept()
+
+    def mouseReleaseEvent(self, e):
+        self._press = None; e.accept()
+
 
 class ClipCard(QFrame):
-    sig_click  = Signal(object)
-    sig_remove = Signal(object)
-    sig_pin    = Signal(object)
-    sig_edit   = Signal(object)
+    sig_click      = Signal(object)
+    sig_remove     = Signal(object)
+    sig_pin        = Signal(object)
+    sig_edit       = Signal(object)
+    sig_drag_begin = Signal(object)
+    sig_drag_end   = Signal()
 
     def __init__(self, item: ClipItem, parent=None):
         super().__init__(parent)
@@ -566,6 +646,10 @@ class ClipCard(QFrame):
         title.setStyleSheet(f"color:{C['t1']};font-size:12px;font-weight:600;background:transparent;")
         title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         hl.addWidget(title, 1)
+        # uchwyt do zmiany kolejności (przed przyciskiem Edit)
+        self._handle = DragHandle()
+        self._handle.drag_requested.connect(self._start_drag)
+        hl.addWidget(self._handle)
         # action buttons
         for sym, obj, tip, fn in [
             ("📝","CardBtn",    "Edit",   lambda: self.sig_edit.emit(self.item)),
@@ -623,6 +707,28 @@ class ClipCard(QFrame):
         bl.addWidget(ts)
         root.addWidget(body)
 
+    def _start_drag(self):
+        pm = self.grab()
+        ghost = QPixmap(pm.size())
+        ghost.setDevicePixelRatio(pm.devicePixelRatio())
+        ghost.fill(Qt.transparent)
+        gp = QPainter(ghost); gp.setOpacity(0.85); gp.drawPixmap(0, 0, pm); gp.end()
+
+        mime = QMimeData(); mime.setData(DRAG_MIME, b"1")
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(ghost)
+        drag.setHotSpot(self._handle.mapTo(self, self._handle.rect().center()))
+
+        eff = QGraphicsOpacityEffect(self); eff.setOpacity(0.35)
+        self.setGraphicsEffect(eff)
+        self.sig_drag_begin.emit(self.item)
+        try:
+            drag.exec(Qt.MoveAction)
+        finally:
+            self.setGraphicsEffect(None)
+            self.sig_drag_end.emit()
+
     def _toggle_pin(self):
         self.item.pinned = not self.item.pinned
         v = "true" if self.item.pinned else "false"
@@ -643,6 +749,31 @@ class ClipCard(QFrame):
 
 # ─── Board ────────────────────────────────────────────────────────────────────
 
+class DropContainer(QWidget):
+    """Kontener kart — przyjmuje upuszczane karty i rysuje wskaźnik wstawienia."""
+    def __init__(self, board):
+        super().__init__()
+        self.board = board
+        self.indicator = None
+        self.setAcceptDrops(True)
+
+    def set_indicator(self, rect):
+        if rect != self.indicator:
+            self.indicator = rect; self.update()
+
+    def dragEnterEvent(self, e):   self.board._drag_enter(e)
+    def dragMoveEvent(self, e):    self.board._drag_move(e, e.position().toPoint())
+    def dragLeaveEvent(self, e):   self.set_indicator(None)
+    def dropEvent(self, e):        self.board._drop(e, e.position().toPoint())
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self.indicator:
+            p = QPainter(self)
+            p.setPen(Qt.NoPen); p.setBrush(QColor(C['acc']))
+            p.drawRoundedRect(self.indicator, 1.5, 1.5)
+
+
 class Board(QWidget):
     item_clicked = Signal(object)
 
@@ -650,11 +781,14 @@ class Board(QWidget):
         super().__init__()
         self.items: list[ClipItem] = []
         self._filter = ""
+        self._drag_item = None
+        self._pending_drop = None
+        self._rebuild_pending = False
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.cont = QWidget(); self.cont.setStyleSheet("background:transparent;")
+        self.cont = DropContainer(self); self.cont.setStyleSheet("background:transparent;")
         self.flow = FlowLayout(self.cont, margin=10, h_sp=8, v_sp=8)
         self.scroll.setWidget(self.cont)
         lay.addWidget(self.scroll)
@@ -677,7 +811,13 @@ class Board(QWidget):
             item.label = to_remove.label
             self.items.remove(to_remove)
             
-        self.items.insert(0, item)
+        # Kolejność wyświetlania: przypięte na górze, w grupie wg kolejności listy (sort stabilny),
+        # więc insert(0) = początek swojej kategorii, append = koniec swojej kategorii.
+        cfg = getattr(self.window(), "config", None) or {}
+        if cfg.get("new_card_position", "top") == "bottom":
+            self.items.append(item)
+        else:
+            self.items.insert(0, item)
         self._rebuild()
 
     def remove_item(self, item):
@@ -694,21 +834,103 @@ class Board(QWidget):
         self._filter = t.lower(); self._rebuild()
 
     def _rebuild(self):
+        if self._drag_item is not None:      # nie niszcz kart w trakcie przeciągania
+            self._rebuild_pending = True
+            return
         self.flow.clear()
         visible = [it for it in self.items
                    if not self._filter
                    or self._filter in it.display().lower()
                    or self._filter in it.text.lower()]
-        for it in sorted(visible, key=lambda x: (not x.pinned, -x.ts)):
+        for it in sorted(visible, key=lambda x: not x.pinned):   # stabilnie: przypięte na górze, reszta wg kolejności listy
             c = ClipCard(it)
             c.sig_click.connect(self.item_clicked)
             c.sig_remove.connect(self._on_remove)
             c.sig_pin.connect(self._on_pin)
             c.sig_edit.connect(self._on_edit)
+            c.sig_drag_begin.connect(self._drag_begin)
+            c.sig_drag_end.connect(self._drag_end)
             self.flow.addWidget(c)
             c.show()
         self.cont.updateGeometry()
         self.cont.adjustSize()
+
+    # ── Drag & drop (zmiana kolejności w obrębie tej samej grupy: przypięte / zwykłe) ──
+    def _drag_begin(self, item):
+        self._drag_item = item
+        self._pending_drop = None
+
+    def _drag_end(self):
+        self.cont.set_indicator(None)
+        pending, self._pending_drop = self._pending_drop, None
+        self._drag_item = None
+        changed = False
+        if pending:
+            item, target, before = pending
+            if item is not target and item in self.items and target in self.items:
+                self.items.remove(item)
+                idx = self.items.index(target) + (0 if before else 1)
+                self.items.insert(idx, item)
+                changed = True
+        if changed or self._rebuild_pending:
+            self._rebuild_pending = False
+            self._rebuild()
+        if changed:
+            self._save()
+
+    def _locate(self, pos):
+        """Zwraca (karta_docelowa, wstaw_przed) lub None — tylko karty tej samej grupy."""
+        drag = self._drag_item
+        if drag is None: return None
+        best, best_d = None, None
+        for i in range(self.flow.count()):
+            w = self.flow.itemAt(i).widget()
+            if not isinstance(w, ClipCard) or w.item.pinned != drag.pinned:
+                continue
+            g = w.geometry()
+            dx = max(g.left() - pos.x(), 0, pos.x() - g.right())
+            dy = max(g.top() - pos.y(), 0, pos.y() - g.bottom())
+            d = dx*dx + dy*dy
+            if best_d is None or d < best_d:
+                best, best_d = w, d
+        if best is None: return None
+        return best, pos.x() < best.geometry().center().x()
+
+    def _drag_enter(self, e):
+        if e.mimeData().hasFormat(DRAG_MIME) and self._drag_item in self.items:
+            e.acceptProposedAction()
+        else:
+            e.ignore()
+
+    def _autoscroll(self, pos):
+        vp = self.scroll.viewport()
+        y = self.cont.mapTo(vp, pos).y()
+        bar = self.scroll.verticalScrollBar()
+        if y < 30:                  bar.setValue(bar.value() - 18)
+        elif y > vp.height() - 30:  bar.setValue(bar.value() + 18)
+
+    def _drag_move(self, e, pos):
+        if not e.mimeData().hasFormat(DRAG_MIME) or self._drag_item is None:
+            e.ignore(); return
+        e.acceptProposedAction()
+        self._autoscroll(pos)
+        loc = self._locate(pos)
+        if not loc:
+            self.cont.set_indicator(None); return
+        card, before = loc
+        g = card.geometry()
+        x = g.left() - 5 if before else g.right() + 3
+        self.cont.set_indicator(QRect(x, g.top(), 3, g.height()))
+
+    def _drop(self, e, pos):
+        loc = self._locate(pos) if e.mimeData().hasFormat(DRAG_MIME) else None
+        self.cont.set_indicator(None)
+        if loc:
+            card, before = loc
+            self._pending_drop = (self._drag_item, card.item, before)
+            e.acceptProposedAction()
+        else:
+            e.ignore()
 
     def _on_remove(self, it): self.remove_item(it); self._save()
     def _on_pin(self, it):    self._rebuild();       self._save()
@@ -997,7 +1219,7 @@ class MainPanel(QWidget):
     def _toggle_pause(self):
         self._is_paused = self._btn_pause.isChecked()
         if self._is_paused:
-            self._btn_pause.setText("stopped ⏸️")
+            self._btn_pause.setText("stopped ▶️")
         else:
             self._btn_pause.setText("works ⏸️")
             # --- ZMIANA: Sync schowka przy wznowieniu, by zignorować to co już tam jest ---
