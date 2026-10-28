@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
     "excel_dependent": False,
     "show_at_cursor": True,
     "new_card_position": "top",
+    "cards_per_row": 0,          # 0 = automatycznie
 }
 
 # ─── Palette ──────────────────────────────────────────────────────────────────
@@ -71,6 +72,32 @@ C = {
     "border":   "#252d42",
     "border_a": "#3d2e80",
 }
+
+# ─── Strzałki do QSpinBox (generowane do plików PNG, bo QSS potrzebuje obrazków) ──
+def _make_spin_arrows():
+    from PySide6.QtGui import QImage, QPolygonF
+    from PySide6.QtCore import QPointF
+    d = Path.home() / ".clipboard_manager_icons"
+    out = {}
+    try:
+        d.mkdir(exist_ok=True)
+        for name, col in (("n", C["t2"]), ("h", C["t1"]), ("d", C["border"])):
+            for direction in ("up", "down"):
+                f = d / f"spin_{direction}_{name}.png"
+                img = QImage(12, 8, QImage.Format_ARGB32); img.fill(0)
+                pt = QPainter(img); pt.setRenderHint(QPainter.Antialiasing)
+                pt.setPen(Qt.NoPen); pt.setBrush(QColor(col))
+                if direction == "up": pts = [QPointF(2,6), QPointF(10,6), QPointF(6,2)]
+                else:                 pts = [QPointF(2,2), QPointF(10,2), QPointF(6,6)]
+                pt.drawPolygon(QPolygonF(pts)); pt.end()
+                img.save(str(f), "PNG")
+                out[f"{direction}_{name}"] = f.as_posix()
+    except Exception:
+        pass
+    return out
+
+_ARW = _make_spin_arrows()
+def _arw(key): return f"url({_ARW[key]})" if key in _ARW else "none"
 
 SS = f"""
 * {{ font-family: 'Segoe UI', Ubuntu, sans-serif; font-size: 13px; color: {C['t1']}; }}
@@ -249,6 +276,14 @@ QSpinBox::up-button, QSpinBox::down-button {{
     background: {C['card_h']}; border: none; width: 16px; border-radius: 3px;
 }}
 QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {C['acc_dim']}; }}
+QSpinBox::up-arrow   {{ image: {_arw('up_n')};   width: 10px; height: 7px; }}
+QSpinBox::down-arrow {{ image: {_arw('down_n')}; width: 10px; height: 7px; }}
+QSpinBox::up-arrow:hover   {{ image: {_arw('up_h')}; }}
+QSpinBox::down-arrow:hover {{ image: {_arw('down_h')}; }}
+QSpinBox:disabled {{ background: {C['panel']}; color: {C['t3']}; border-color: {C['border']}; }}
+QSpinBox::up-button:disabled, QSpinBox::down-button:disabled {{ background: transparent; }}
+QSpinBox::up-arrow:disabled   {{ image: {_arw('up_d')}; }}
+QSpinBox::down-arrow:disabled {{ image: {_arw('down_d')}; }}
 QPushButton#ModeBtn {{
     background: {C['card']}; color: {C['t2']};
     border: 1px solid {C['border']}; border-radius: 7px;
@@ -406,20 +441,25 @@ class FlowLayout(QLayout):
         m   = self.contentsMargins()
         x0  = rect.x() + m.left()
         y   = rect.y() + m.top()
-        x   = x0
-        rh  = 0
+        avail = rect.width() - m.left() - m.right()
+        # Ile kolumn: ustawione ręcznie albo wyliczone z preferowanej szerokości karty.
+        auto_cols = max(1, (avail + self._h) // (CARD_W + self._h))
+        max_cols  = max(1, (avail + self._h) // (CARD_MIN_W + self._h))   # nie zmniejszaj kart poniżej minimum
+        cols = min(CARDS_PER_ROW, max_cols) if CARDS_PER_ROW > 0 else auto_cols
+        cw   = (avail - (cols - 1) * self._h) // cols if avail > 0 else CARD_W
+        cw   = max(CARD_MIN_W, cw)
+        x, col, rh = x0, 0, 0
         for it in self._items:
             w = it.widget()
             if w is None: continue
-            iw = it.sizeHint().width()
+            if col >= cols:
+                col = 0; x = x0; y += rh + self._v; rh = 0
+            if hasattr(w, "set_card_width"):
+                w.set_card_width(cw)          # skaluje kartę i zawartość (też obrazek)
             ih = it.sizeHint().height()
-            nx = x + iw + self._h
-            if nx - self._h > rect.right() - m.right() and x > x0:
-                x = x0; y += rh + self._v; rh = 0
-                nx = x + iw + self._h
             if not dry:
-                it.setGeometry(QRect(QPoint(x, y), it.sizeHint()))
-            x = nx; rh = max(rh, ih)
+                it.setGeometry(QRect(QPoint(x, y), QSize(cw, ih)))
+            x += cw + self._h; col += 1; rh = max(rh, ih)
         return y + rh - rect.y() + m.bottom()
 
     def clear(self):
@@ -483,7 +523,17 @@ class SettingsDialog(QDialog):
         self.setAttribute(Qt.WA_ShowWithoutActivating, False)
         self.setWindowModality(Qt.NonModal)
         self.setMinimumWidth(400); self.setStyleSheet(SS)
-        lay = QVBoxLayout(self); lay.setContentsMargins(20,20,20,20); lay.setSpacing(14)
+        # Zewnętrzny układ: przewijana zawartość + stały pasek przycisków na dole,
+        # dzięki temu okno nigdy nie jest wyższe niż ekran.
+        outer = QVBoxLayout(self); outer.setContentsMargins(0,0,0,0); outer.setSpacing(0)
+        self._scroll = QScrollArea(); self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body = QWidget(); body.setObjectName("SettingsBody")
+        body.setStyleSheet("#SettingsBody{background:transparent;}")
+        self._scroll.setWidget(body)
+        outer.addWidget(self._scroll, 1)
+        lay = QVBoxLayout(body); lay.setContentsMargins(20,20,20,10); lay.setSpacing(14)
 
         t = QLabel("⚙  Settings"); t.setStyleSheet("font-size:15px;font-weight:600;")
         lay.addWidget(t)
@@ -529,6 +579,20 @@ class SettingsDialog(QDialog):
         lay.addWidget(self._note("Check if Excel mode should be paused when clipboard listening is paused. Uncheck (default) for cleanup to always run."))
         lay.addWidget(self._sep())
 
+        lay.addWidget(self._lbl("Cards per row:"))
+        cr = QHBoxLayout(); cr.setSpacing(12)
+        cpr = int(cfg.get("cards_per_row", 0) or 0)
+        self.spin_cpr = QSpinBox(); self.spin_cpr.setRange(1, 12); self.spin_cpr.setSingleStep(1)
+        self.spin_cpr.setValue(cpr if cpr > 0 else 4)
+        self.cb_cpr_auto = QCheckBox("Auto")
+        self.cb_cpr_auto.setChecked(cpr <= 0)
+        self.spin_cpr.setEnabled(cpr > 0)
+        self.cb_cpr_auto.toggled.connect(lambda on: self.spin_cpr.setEnabled(not on))
+        cr.addWidget(self.spin_cpr); cr.addWidget(self.cb_cpr_auto); cr.addStretch(); lay.addLayout(cr)
+        lay.addWidget(self._note("Auto = as many cards as fit (cards stretch to fill the row). "
+                                 "A number fixes how many cards are in each row — cards scale to fit the window width."))
+        lay.addWidget(self._sep())
+
         lay.addWidget(self._lbl("Size (px):"))
         hr = QHBoxLayout(); hr.setSpacing(16)
         for attr, label, lo, hi, val in [
@@ -542,10 +606,32 @@ class SettingsDialog(QDialog):
         hr.addStretch(); lay.addLayout(hr)
 
         lay.addStretch()
-        row2 = QHBoxLayout(); row2.addStretch()
+        row2 = QHBoxLayout(); row2.setContentsMargins(20,10,20,16); row2.addStretch()
         c = QPushButton("Cancel"); c.setObjectName("DlgCancel"); c.clicked.connect(self.reject)
         s = QPushButton("Apply");  s.setObjectName("DlgOk");    s.clicked.connect(self._save)
-        row2.addWidget(c); row2.addWidget(s); lay.addLayout(row2)
+        row2.addWidget(c); row2.addWidget(s); outer.addLayout(row2)
+        self._body = body
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._fit_to_screen()
+
+    def _fit_to_screen(self):
+        """Ogranicz wysokość do dostępnego obszaru ekranu i przesuń okno tak, by w całości było widoczne."""
+        from PySide6.QtGui import QGuiApplication
+        scr = (self.parentWidget().screen() if self.parentWidget() else None) or self.screen() or QGuiApplication.primaryScreen()
+        sc = scr.availableGeometry()
+        margin = 20
+        want_h = self._body.sizeHint().height() + 70          # zawartość + pasek przycisków
+        h = max(300, min(want_h, sc.height() - 2*margin))
+        w = max(self.width(), self.minimumWidth())
+        if self._scroll.verticalScrollBar().isVisible() or want_h > h:
+            w += 14                                            # miejsce na scrollbar
+        w = min(w, sc.width() - 2*margin)
+        self.resize(w, h)
+        x = max(sc.x() + margin, min(self.x(), sc.x() + sc.width()  - w - margin))
+        y = max(sc.y() + margin, min(self.y(), sc.y() + sc.height() - h - margin))
+        self.move(x, y)
 
     def _lbl(self, t):  l=QLabel(t); l.setStyleSheet(f"color:{C['t2']}"); return l
     def _note(self, t): l=QLabel(t); l.setStyleSheet(f"color:{C['t3']};font-size:11px"); l.setWordWrap(True); return l
@@ -557,6 +643,7 @@ class SettingsDialog(QDialog):
         self.cfg["panel_height"] = self.spin_ph.value()
         self.cfg["panel_width"]  = self.spin_pw.value()
         self.cfg["bar_height"]   = self.spin_bh.value()
+        self.cfg["cards_per_row"] = 0 if self.cb_cpr_auto.isChecked() else self.spin_cpr.value()
         self.cfg["excel_dependent"] = self.cb_excel_dep.isChecked()
         self.cfg["show_at_cursor"]  = self.cb_cursor.isChecked()
         self.cfg["new_card_position"] = "bottom" if self.rb_bottom.isChecked() else "top"
@@ -567,7 +654,9 @@ class SettingsDialog(QDialog):
 
 # ─── Clip Card ────────────────────────────────────────────────────────────────
 
-CARD_W = 280
+CARD_W = 280          # preferowana (minimalna w trybie auto) szerokość karty
+CARD_MIN_W = 150      # absolutne minimum szerokości karty
+CARDS_PER_ROW = 0     # 0 = auto; >0 = stała liczba kart w wierszu (ustawiana z Settings)
 DRAG_MIME = "application/x-clipcard-reorder"
 
 
@@ -626,6 +715,9 @@ class ClipCard(QFrame):
     def __init__(self, item: ClipItem, parent=None):
         super().__init__(parent)
         self.item = item
+        self._img_src = None      # oryginalny QPixmap (do skalowania przy zmianie szerokości)
+        self._img_lbl = None
+        self._img_w   = 0
         self.setFixedWidth(CARD_W)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
         self.setCursor(Qt.PointingHandCursor)
@@ -673,8 +765,9 @@ class ClipCard(QFrame):
             data = base64.b64decode(self.item.img_b64)
             qimg = QImage.fromData(QByteArray(data))
             if not qimg.isNull():
-                pm = QPixmap.fromImage(qimg).scaledToWidth(CARD_W-20, Qt.SmoothTransformation)
-                lbl.setPixmap(pm)
+                self._img_src = QPixmap.fromImage(qimg)
+                self._img_lbl = lbl
+                self._update_image(self.width())
             lbl.setStyleSheet("background:transparent;")
             bl.addWidget(lbl)
         else:
@@ -706,6 +799,22 @@ class ClipCard(QFrame):
         ts.setStyleSheet(f"color:{C['t3']};font-size:11px;background:transparent;")
         bl.addWidget(ts)
         root.addWidget(body)
+
+    def _update_image(self, card_w):
+        """Skaluje obrazek do aktualnej szerokości karty (minus marginesy body 2x10 px)."""
+        if self._img_src is None or self._img_lbl is None: return
+        tw = max(40, card_w - 20)
+        if tw == self._img_w: return
+        self._img_w = tw
+        self._img_lbl.setPixmap(self._img_src.scaledToWidth(tw, Qt.SmoothTransformation))
+
+    def set_card_width(self, w):
+        if self.width() == w and self.minimumWidth() == w and self._img_w == max(40, w - 20):
+            return
+        self.setFixedWidth(w)
+        self._update_image(w)
+        lay = self.layout()
+        if lay: lay.activate()     # odśwież sizeHint po zmianie szerokości/obrazka
 
     def _start_drag(self):
         pm = self.grab()
@@ -1009,6 +1118,7 @@ class MainPanel(QWidget):
         super().__init__()
         self._is_paused = False
         self.config = self._load_cfg()
+        self._apply_cards_per_row()
         self._drag_pos = None
         self._last_tab = 0
         self._boards: list[Board] = []
@@ -1441,12 +1551,20 @@ class MainPanel(QWidget):
 
     # ── Settings ─────────────────────────────────────────────────────────
 
+    def _apply_cards_per_row(self):
+        global CARDS_PER_ROW
+        try: CARDS_PER_ROW = max(0, int(self.config.get("cards_per_row", 0)))
+        except Exception: CARDS_PER_ROW = 0
+        for b in getattr(self, "_boards", []):
+            b.flow.invalidate(); b.cont.updateGeometry(); b.cont.adjustSize()
+
     def _settings(self):
         dlg = SettingsDialog(self.config, self)
         dlg.setParent(self, Qt.Tool | Qt.FramelessWindowHint)
         if dlg.exec():
             old_key = self.config.get("hotkey")
             self.config = dlg.get(); self._save_cfg()
+            self._apply_cards_per_row()
             if self.config.get("hotkey") != old_key: self._setup_hotkey()
             self._apply_geometry(); self.show(); self.raise_(); self.activateWindow()
 
