@@ -3,7 +3,7 @@
 Clipboard Manager — clean rewrite matching the reference UI.
 """
 
-import sys, json, os, time, base64, csv, io
+import sys, json, os, time, base64, csv, io, re, hashlib
 from pathlib import Path
 from datetime import datetime
 
@@ -28,17 +28,21 @@ from PySide6.QtWidgets import (
     QLayout, QCheckBox, QRadioButton, QButtonGroup, QGraphicsOpacityEffect,
 )
 # DODANO QMimeData DO IMPORTÓW PONIŻEJ
-from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QEvent, QBuffer, QSize, QRect, QPoint, QPointF, QMimeData
+from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QEvent, QBuffer, QSize, QRect, QPoint, QPointF, QMimeData, QUrl
 from PySide6.QtGui import (
     QColor, QFont, QIcon, QPixmap, QPainter, QImage,
     QGuiApplication, QKeySequence, QShortcut, QDrag,
+    QMovie, QImageReader,
 )
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 APP_NAME    = "Clipboard Manager"
 DATA_FILE   = Path.home() / ".clipboard_manager_data.json"
 CONFIG_FILE = Path.home() / ".clipboard_manager_config.json"
+GIF_DIR     = Path.home() / ".clipboard_manager_gifs"   # pliki tymczasowe do wklejania GIFów
+MAX_GIF_BYTES = 20 * 1024 * 1024                         # większe GIFy zapisujemy tylko jako statyczny obraz
 
 DEFAULT_CONFIG = {
     "hotkey":       "`",
@@ -385,6 +389,47 @@ def _excel_clean(text: str) -> str:
         return text.strip('"')
 
 
+# ─── GIF helpers ─────────────────────────────────────────────────────────────
+
+def _gif_frame_count(data: bytes) -> int:
+    """Liczba klatek GIFa (>1 = animowany)."""
+    try:
+        ba = QByteArray(data); buf = QBuffer(ba); buf.open(QBuffer.ReadOnly)
+        return QImageReader(buf, QByteArray(b"gif")).imageCount()
+    except Exception:
+        return 0
+
+def _is_animated_gif(data: bytes) -> bool:
+    return (data[:4] == b"GIF8" and len(data) <= MAX_GIF_BYTES
+            and _gif_frame_count(data) > 1)
+
+def _gif_from_mime(mime) -> bytes | None:
+    """Szuka surowych bajtów GIFa w schowku (image/gif albo format Windows 'GIF')."""
+    for fmt in mime.formats():
+        if "gif" in fmt.lower():
+            data = bytes(mime.data(fmt))
+            if data[:4] == b"GIF8":
+                return data
+    return None
+
+def _gif_src_from_html(html: str) -> str | None:
+    """Jeśli schowek zawiera <img src=...gif> (kopiowanie z przeglądarki), zwraca src."""
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.I)
+    if not m: return None
+    src = m.group(1).replace("&amp;", "&")
+    low = src.lower()
+    if low.startswith("data:image/gif"): return src
+    if re.match(r"https?://", low) and ".gif" in low: return src
+    return None
+
+def _gif_temp_file(raw: bytes) -> Path:
+    GIF_DIR.mkdir(exist_ok=True)
+    p = GIF_DIR / (hashlib.md5(raw).hexdigest() + ".gif")
+    if not p.exists():
+        p.write_bytes(raw)
+    return p
+
+
 # ─── Data model ───────────────────────────────────────────────────────────────
 
 class ClipItem:
@@ -400,6 +445,7 @@ class ClipItem:
     def display(self):
         if self.label: return self.label
         if self.ctype == "text": return self.text[:200].replace("\n", " ")
+        if self.ctype == "gif": return "[GIF]"
         return "[Image]"
 
     def to_dict(self):
@@ -718,6 +764,8 @@ class ClipCard(QFrame):
         self._img_src = None      # oryginalny QPixmap (do skalowania przy zmianie szerokości)
         self._img_lbl = None
         self._img_w   = 0
+        self._movie   = None      # QMovie dla animowanych GIFów
+        self._gif_size = QSize()
         self.setFixedWidth(CARD_W)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
         self.setCursor(Qt.PointingHandCursor)
@@ -730,7 +778,7 @@ class ClipCard(QFrame):
         hdr = QWidget(); hdr.setFixedHeight(40)
         hdr.setStyleSheet(f"background:{C['acc_dim']};border-radius:8px 8px 0 0;")
         hl = QHBoxLayout(hdr); hl.setContentsMargins(10,0,6,0); hl.setSpacing(4)
-        ico = QLabel("🖼" if self.item.ctype=="image" else "📋")
+        ico = QLabel({"image": "🖼", "gif": "🎞"}.get(self.item.ctype, "📋"))
         ico.setStyleSheet("font-size:16px;background:transparent;")
         hl.addWidget(ico)
         disp = self.item.display()
@@ -760,7 +808,21 @@ class ClipCard(QFrame):
         bl = QVBoxLayout(body); bl.setContentsMargins(10,8,10,10)
         bl.setAlignment(Qt.AlignTop) # Prevents vertical centering layout quirks
         
-        if self.item.ctype == "image" and self.item.img_b64:
+        if self.item.ctype == "gif" and self.item.img_b64:
+            lbl = QLabel()
+            lbl.setStyleSheet("background:transparent;")
+            # bufor i bajty muszą żyć tak długo jak QMovie
+            self._gif_bytes = QByteArray(base64.b64decode(self.item.img_b64))
+            self._gif_buf = QBuffer(self._gif_bytes); self._gif_buf.open(QBuffer.ReadOnly)
+            movie = QMovie(self._gif_buf, QByteArray(b"gif"), self)
+            if movie.isValid() and movie.jumpToFrame(0):
+                self._gif_size = movie.currentImage().size()
+                self._movie = movie
+                self._img_lbl = lbl
+                lbl.setMovie(movie)
+                self._update_image(self.width())
+            bl.addWidget(lbl)
+        elif self.item.ctype == "image" and self.item.img_b64:
             lbl = QLabel()
             data = base64.b64decode(self.item.img_b64)
             qimg = QImage.fromData(QByteArray(data))
@@ -802,11 +864,31 @@ class ClipCard(QFrame):
 
     def _update_image(self, card_w):
         """Skaluje obrazek do aktualnej szerokości karty (minus marginesy body 2x10 px)."""
-        if self._img_src is None or self._img_lbl is None: return
+        if self._img_lbl is None: return
         tw = max(40, card_w - 20)
         if tw == self._img_w: return
         self._img_w = tw
-        self._img_lbl.setPixmap(self._img_src.scaledToWidth(tw, Qt.SmoothTransformation))
+        if self._movie is not None:
+            sw, sh = self._gif_size.width(), self._gif_size.height()
+            th = max(1, round(tw * sh / sw)) if sw > 0 else tw
+            self._movie.setScaledSize(QSize(tw, th))
+            self._img_lbl.setFixedSize(tw, th)
+        elif self._img_src is not None:
+            self._img_lbl.setPixmap(self._img_src.scaledToWidth(tw, Qt.SmoothTransformation))
+
+    # GIF animuje się tylko, gdy karta jest widoczna (oszczędza CPU przy ukrytym panelu / innej zakładce)
+    def showEvent(self, e):
+        super().showEvent(e)
+        m = self._movie
+        if m is not None:
+            if m.state() == QMovie.NotRunning: m.start()
+            elif m.state() == QMovie.Paused:   m.setPaused(False)
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        m = self._movie
+        if m is not None and m.state() == QMovie.Running:
+            m.setPaused(True)
 
     def set_card_width(self, w):
         if self.width() == w and self.minimumWidth() == w and self._img_w == max(40, w - 20):
@@ -910,7 +992,7 @@ class Board(QWidget):
                 if item.ctype == "text" and existing.text == item.text:
                     to_remove = existing
                     break
-                elif item.ctype == "image" and existing.img_b64 == item.img_b64:
+                elif item.ctype in ("image", "gif") and existing.img_b64 == item.img_b64:
                     to_remove = existing
                     break
                     
@@ -1366,6 +1448,18 @@ class MainPanel(QWidget):
                     cb.setMimeData(mime)
                     self._last_img = (ba.size(), "png")
                     self._last_text = ""
+            elif item.ctype == "gif" and item.img_b64:
+                raw = base64.b64decode(item.img_b64)
+                mime = QMimeData()
+                # Plik .gif (czaty, Explorer, Discord/Slack/Teams wklejają animację),
+                # surowy image/gif oraz pierwsza klatka jako obraz (Paint, Word itd.)
+                try: mime.setUrls([QUrl.fromLocalFile(str(_gif_temp_file(raw)))])
+                except OSError: pass
+                mime.setData("image/gif", QByteArray(raw))
+                first = QImage.fromData(QByteArray(raw))
+                if not first.isNull(): mime.setImageData(first)
+                cb.setMimeData(mime)
+                self._last_text = ""
         finally:
             QTimer.singleShot(200, lambda: setattr(self, '_ignore_clipboard', False))
         self.hide_to_tray()
@@ -1376,8 +1470,39 @@ class MainPanel(QWidget):
         self._last_update = 0  # Zmienna do zapobiegania spamowi zdarzeń
         self._ignore_clipboard = False  # Flaga: blokuje _poll_clip gdy sami piszemy do schowka
         cb = QGuiApplication.clipboard()
+        self._nam = QNetworkAccessManager(self)   # pobieranie GIFów kopiowanych z przeglądarki
+        self._gif_pending = set()
         # Zamiast QTimer, używamy sygnału systemowego - reaguje na sam fakt "Kopiuj"
         cb.dataChanged.connect(self._poll_clip)
+
+    def _add_gif(self, data: bytes):
+        self._boards[self._last_tab].add_item(
+            ClipItem("gif", img_b64=base64.b64encode(data).decode()))
+
+    def _fetch_gif(self, url: str, fallback_png: bytes):
+        """Pobiera GIF z URL-a asynchronicznie; przy porażce dodaje statyczny obraz z fallbacku."""
+        if url in self._gif_pending: return
+        self._gif_pending.add(url)
+        req = QNetworkRequest(QUrl(url))
+        req.setAttribute(QNetworkRequest.RedirectPolicyAttribute,
+                         QNetworkRequest.NoLessSafeRedirectPolicy)
+        req.setTransferTimeout(8000)
+        reply = self._nam.get(req)
+        reply.finished.connect(lambda r=reply: self._gif_fetched(r, url, fallback_png))
+
+    def _gif_fetched(self, reply, url, fallback_png):
+        self._gif_pending.discard(url)
+        data = bytes(reply.readAll()) if reply.error() == QNetworkReply.NoError else b""
+        reply.deleteLater()
+        if self._is_paused: return
+        if _is_animated_gif(data):
+            self._add_gif(data)
+        elif fallback_png:
+            self._boards[self._last_tab].add_item(
+                ClipItem("image", img_b64=base64.b64encode(fallback_png).decode()))
+        else:
+            return
+        self._save_data()
 
     def _poll_clip(self):
         # Jeśli sami właśnie zapisaliśmy do schowka (Excel mode), ignorujemy to zdarzenie
@@ -1421,6 +1546,14 @@ class MainPanel(QWidget):
                 if url.isLocalFile():
                     fp = url.toLocalFile()
                     ext = Path(fp).suffix.lower()
+                    if ext == '.gif':
+                        try: gdata = Path(fp).read_bytes()
+                        except OSError: gdata = b""
+                        if _is_animated_gif(gdata):
+                            if not self._is_paused:
+                                self._add_gif(gdata)
+                            added = True
+                            continue
                     if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
                         img = QImage(fp)
                         if not img.isNull():
@@ -1438,6 +1571,16 @@ class MainPanel(QWidget):
         # --- PRIORYTET 2: Obrazy (Przeglądarka, Photoshop, PrintScreen) ---
         # Wyjątek: Jeśli to Office LUB tabela, ignorujemy podgląd obrazu (aby priorytetyzować tekst komórek),
         # chyba że nie ma w ogóle tekstu (wtedy kopiujemy jako obraz, np. skopiowany wykres z Excela).
+        # --- PRIORYTET 2a: Animowany GIF w schowku (surowe bajty image/gif) ---
+        if not (is_office_or_table and bool(t)):
+            gif = _gif_from_mime(mime)
+            if gif and _is_animated_gif(gif):
+                if not self._is_paused:
+                    self._add_gif(gif)
+                    self._save_data()
+                self._last_update = now
+                return
+
         if mime.hasImage() and not (is_office_or_table and bool(t)):
             if mime.hasFormat("image/png"):
                 ba = mime.data("image/png")
@@ -1445,7 +1588,23 @@ class MainPanel(QWidget):
                 img = cb.image()
                 if img.isNull(): return
                 ba = QByteArray(); buf = QBuffer(ba); buf.open(QBuffer.WriteOnly); img.save(buf, "PNG")
-            
+
+            # --- PRIORYTET 2b: kopiowanie obrazu z przeglądarki — w HTML jest adres GIFa,
+            # a w schowku tylko statyczna klatka. Pobieramy oryginał (asynchronicznie).
+            gif_src = _gif_src_from_html(mime.html()) if mime.hasHtml() else None
+            if gif_src and not self._is_paused:
+                if gif_src.lower().startswith("data:"):
+                    try: gdata = base64.b64decode(gif_src.split(",", 1)[1])
+                    except Exception: gdata = b""
+                    if _is_animated_gif(gdata):
+                        self._add_gif(gdata); self._save_data()
+                        self._last_update = now
+                        return
+                else:
+                    self._fetch_gif(gif_src, bytes(ba))
+                    self._last_update = now
+                    return
+
             if not self._is_paused:
                 self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
                 self._save_data()
