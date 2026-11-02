@@ -3,7 +3,8 @@
 Clipboard Manager — clean rewrite matching the reference UI.
 """
 
-import sys, json, os, time, base64, csv, io, re, hashlib
+import sys, json, os, time, base64, csv, io, re, hashlib, shutil
+from collections import OrderedDict
 from pathlib import Path
 from datetime import datetime
 
@@ -39,9 +40,12 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkRe
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 APP_NAME    = "Clipboard Manager"
-DATA_FILE   = Path.home() / ".clipboard_manager_data.json"
 CONFIG_FILE = Path.home() / ".clipboard_manager_config.json"
-GIF_DIR     = Path.home() / ".clipboard_manager_gifs"   # pliki tymczasowe do wklejania GIFów
+
+# Dane: ~/.clipboard_manager/data.json (same metadane) + img/ i gif/ (pliki nazwane hashem zawartości)
+DATA_DIR    = Path.home() / ".clipboard_manager"
+DATA_FILE   = DATA_DIR / "data.json"
+LEGACY_DATA_FILE = Path.home() / ".clipboard_manager_data.json"   # stary format (obrazy jako base64 w JSON)
 MAX_GIF_BYTES = 20 * 1024 * 1024                         # większe GIFy zapisujemy tylko jako statyczny obraz
 
 DEFAULT_CONFIG = {
@@ -422,25 +426,81 @@ def _gif_src_from_html(html: str) -> str | None:
     if re.match(r"https?://", low) and ".gif" in low: return src
     return None
 
-def _gif_temp_file(raw: bytes) -> Path:
-    GIF_DIR.mkdir(exist_ok=True)
-    p = GIF_DIR / (hashlib.md5(raw).hexdigest() + ".gif")
+# ─── Media storage (img/ i gif/) ─────────────────────────────────────────────
+
+def _media_dir(ctype: str) -> Path:
+    return DATA_DIR / ("gif" if ctype == "gif" else "img")
+
+def _store_media(ctype: str, data: bytes) -> str:
+    """Zapisuje bajty jako <sha1>.png / <sha1>.gif i zwraca nazwę pliku.
+    Nazwa = hash zawartości, więc identyczne obrazy współdzielą jeden plik."""
+    name = hashlib.sha1(data).hexdigest() + (".gif" if ctype == "gif" else ".png")
+    p = _media_dir(ctype) / name
     if not p.exists():
-        p.write_bytes(raw)
-    return p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(name + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, p)            # atomowo — nie zostanie połowicznie zapisany plik
+    return name
+
+# Cache przeskalowanych podglądów (plik, szerokość) → QPixmap; dekodowanie oryginału tylko raz.
+_PIX_CACHE: "OrderedDict[tuple, QPixmap]" = OrderedDict()
+_PIX_CACHE_MAX = 64
+
+def _scaled_pixmap(item, tw: int):
+    key = (item.file or id(item), tw)
+    pm = _PIX_CACHE.get(key)
+    if pm is not None:
+        _PIX_CACHE.move_to_end(key)
+        return pm
+    img = QImage.fromData(QByteArray(item.raw()))
+    if img.isNull():
+        return None
+    pm = QPixmap.fromImage(img.scaledToWidth(tw, Qt.SmoothTransformation))
+    _PIX_CACHE[key] = pm
+    while len(_PIX_CACHE) > _PIX_CACHE_MAX:
+        _PIX_CACHE.popitem(last=False)
+    return pm
 
 
 # ─── Data model ───────────────────────────────────────────────────────────────
 
 class ClipItem:
     def __init__(self, ctype="text", text="", img_b64="",
-                 ts=None, pinned=False, label=""):
+                 ts=None, pinned=False, label="", file=""):
         self.ctype   = ctype
         self.text    = text
-        self.img_b64 = img_b64
+        self.img_b64 = img_b64     # tylko fallback (stary format / nieudany zapis pliku)
+        self.file    = file        # nazwa pliku w img/ lub gif/
         self.ts      = ts or time.time()
         self.pinned  = pinned
         self.label   = label
+
+    @classmethod
+    def media(cls, ctype, data: bytes):
+        """Tworzy kartę obrazu/GIFa i zapisuje bajty do pliku (przy błędzie dysku — fallback do base64)."""
+        try:
+            return cls(ctype, file=_store_media(ctype, data))
+        except OSError as e:
+            print("media:", e)
+            return cls(ctype, img_b64=base64.b64encode(data).decode())
+
+    def key(self):
+        """Klucz do wykrywania duplikatów obrazów."""
+        return self.file or self.img_b64
+
+    def path(self) -> Path:
+        return _media_dir(self.ctype) / self.file
+
+    def raw(self) -> bytes:
+        """Surowe bajty obrazu/GIFa (z pliku, a w razie braku — z base64)."""
+        if self.file:
+            try: return self.path().read_bytes()
+            except OSError: return b""
+        if self.img_b64:
+            try: return base64.b64decode(self.img_b64)
+            except Exception: return b""
+        return b""
 
     def display(self):
         if self.label: return self.label
@@ -449,13 +509,24 @@ class ClipItem:
         return "[Image]"
 
     def to_dict(self):
-        return dict(ctype=self.ctype, text=self.text, img_b64=self.img_b64,
-                    ts=self.ts, pinned=self.pinned, label=self.label)
+        d = dict(ctype=self.ctype, text=self.text, ts=self.ts,
+                 pinned=self.pinned, label=self.label)
+        if self.file:          d["file"] = self.file
+        elif self.img_b64:     d["img_b64"] = self.img_b64
+        return d
 
     @classmethod
     def from_dict(cls, d):
-        return cls(d.get("ctype","text"), d.get("text",""), d.get("img_b64",""),
-                   d.get("ts", time.time()), d.get("pinned",False), d.get("label",""))
+        it = cls(d.get("ctype","text"), d.get("text",""), d.get("img_b64",""),
+                 d.get("ts", time.time()), d.get("pinned",False), d.get("label",""),
+                 d.get("file",""))
+        if it.img_b64 and not it.file:           # migracja ze starego formatu (base64 w JSON)
+            try:
+                it.file = _store_media(it.ctype, base64.b64decode(it.img_b64))
+                it.img_b64 = ""
+            except Exception as e:
+                print("migrate:", e)               # zostaje base64 jako fallback
+        return it
 
 
 # ─── Flow layout (wrapping grid) ─────────────────────────────────────────────
@@ -761,7 +832,6 @@ class ClipCard(QFrame):
     def __init__(self, item: ClipItem, parent=None):
         super().__init__(parent)
         self.item = item
-        self._img_src = None      # oryginalny QPixmap (do skalowania przy zmianie szerokości)
         self._img_lbl = None
         self._img_w   = 0
         self._movie   = None      # QMovie dla animowanych GIFów
@@ -808,29 +878,28 @@ class ClipCard(QFrame):
         bl = QVBoxLayout(body); bl.setContentsMargins(10,8,10,10)
         bl.setAlignment(Qt.AlignTop) # Prevents vertical centering layout quirks
         
-        if self.item.ctype == "gif" and self.item.img_b64:
+        if self.item.ctype in ("image", "gif") and (self.item.file or self.item.img_b64):
             lbl = QLabel()
             lbl.setStyleSheet("background:transparent;")
-            # bufor i bajty muszą żyć tak długo jak QMovie
-            self._gif_bytes = QByteArray(base64.b64decode(self.item.img_b64))
-            self._gif_buf = QBuffer(self._gif_bytes); self._gif_buf.open(QBuffer.ReadOnly)
-            movie = QMovie(self._gif_buf, QByteArray(b"gif"), self)
-            if movie.isValid() and movie.jumpToFrame(0):
-                self._gif_size = movie.currentImage().size()
-                self._movie = movie
-                self._img_lbl = lbl
-                lbl.setMovie(movie)
-                self._update_image(self.width())
-            bl.addWidget(lbl)
-        elif self.item.ctype == "image" and self.item.img_b64:
-            lbl = QLabel()
-            data = base64.b64decode(self.item.img_b64)
-            qimg = QImage.fromData(QByteArray(data))
-            if not qimg.isNull():
-                self._img_src = QPixmap.fromImage(qimg)
+            if self.item.ctype == "gif":
+                raw = self.item.raw()
+                if raw:
+                    # Bajty trzymamy w pamięci (nie otwieramy pliku) — dzięki temu plik można
+                    # bez problemu skasować na Windows, a bufor żyje tak długo jak QMovie.
+                    self._gif_bytes = QByteArray(raw)
+                    self._gif_buf = QBuffer(self._gif_bytes); self._gif_buf.open(QBuffer.ReadOnly)
+                    movie = QMovie(self._gif_buf, QByteArray(b"gif"), self)
+                    if movie.isValid() and movie.jumpToFrame(0):
+                        self._gif_size = movie.currentImage().size()
+                        self._movie = movie
+                        self._img_lbl = lbl
+                        lbl.setMovie(movie)
+                        self._update_image(self.width())
+            else:
                 self._img_lbl = lbl
                 self._update_image(self.width())
-            lbl.setStyleSheet("background:transparent;")
+            if self._img_lbl is None:
+                self._missing(lbl)
             bl.addWidget(lbl)
         else:
             # TEXT DISPLAY - Wykorzystujemy QTextEdit dla identycznego wyglądu jak w edytorze
@@ -873,8 +942,19 @@ class ClipCard(QFrame):
             th = max(1, round(tw * sh / sw)) if sw > 0 else tw
             self._movie.setScaledSize(QSize(tw, th))
             self._img_lbl.setFixedSize(tw, th)
-        elif self._img_src is not None:
-            self._img_lbl.setPixmap(self._img_src.scaledToWidth(tw, Qt.SmoothTransformation))
+        else:
+            pm = _scaled_pixmap(self.item, tw)
+            if pm is not None:
+                self._img_lbl.setPixmap(pm)
+            else:
+                self._missing(self._img_lbl)
+                self._img_lbl = None
+
+    @staticmethod
+    def _missing(lbl):
+        """Plik obrazu usunięty / uszkodzony — pokazujemy placeholder zamiast wywracać kartę."""
+        lbl.setText("⚠ brak pliku obrazu")
+        lbl.setStyleSheet(f"color:{C['t3']};font-size:11px;background:transparent;")
 
     # GIF animuje się tylko, gdy karta jest widoczna (oszczędza CPU przy ukrytym panelu / innej zakładce)
     def showEvent(self, e):
@@ -992,7 +1072,7 @@ class Board(QWidget):
                 if item.ctype == "text" and existing.text == item.text:
                     to_remove = existing
                     break
-                elif item.ctype in ("image", "gif") and existing.img_b64 == item.img_b64:
+                elif item.ctype in ("image", "gif") and item.key() and existing.key() == item.key():
                     to_remove = existing
                     break
                     
@@ -1199,6 +1279,11 @@ class MainPanel(QWidget):
     def __init__(self):
         super().__init__()
         self._is_paused = False
+        self._loaded_ok = True            # False => nie sprzątamy plików (np. uszkodzony JSON)
+        # Zapis z opóźnieniem: seria zmian (pin, drag, kilka kopiowań) = jeden zapis
+        self._save_timer = QTimer(self); self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self._write_data)
+        QApplication.instance().aboutToQuit.connect(self._flush_save)
         self.config = self._load_cfg()
         self._apply_cards_per_row()
         self._drag_pos = None
@@ -1225,9 +1310,12 @@ class MainPanel(QWidget):
         with open(CONFIG_FILE,"w") as f: json.dump(self.config, f, indent=2)
 
     def _load_data(self):
-        if not DATA_FILE.exists(): return
+        # Nowy format w ~/.clipboard_manager/, a jeśli go jeszcze nie ma — stary plik (migracja)
+        src = DATA_FILE if DATA_FILE.exists() else (LEGACY_DATA_FILE if LEGACY_DATA_FILE.exists() else None)
+        if src is None: return
+        migrated = src is LEGACY_DATA_FILE
         try:
-            with open(DATA_FILE) as f: data = json.load(f)
+            with open(src, encoding="utf-8") as f: data = json.load(f)
             for td in data.get("tabs",[]):
                 name  = td.get("name","Tab")
                 items = [ClipItem.from_dict(d) for d in td.get("items",[])]
@@ -1236,13 +1324,50 @@ class MainPanel(QWidget):
                     self._boards[idx].items = items; self._boards[idx]._rebuild()
                 else:
                     self._add_tab(name, items)
-        except Exception as e: print("load:", e)
+        except Exception as e:
+            print("load:", e)
+            self._loaded_ok = False
+            migrated = False
+            try: shutil.copy2(src, src.with_name(src.name + ".corrupt"))   # kopia ratunkowa
+            except OSError: pass
         self._refresh_tabs()
+        if migrated:
+            self._write_data()    # zapisz nowy format od razu; stary plik zostaje jako kopia zapasowa
 
     def _save_data(self):
+        """Zapis z opóźnieniem 400 ms (wywoływany często — pin, drag, nowe kopie)."""
+        self._save_timer.start(400)
+
+    def _flush_save(self):
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+            self._write_data()
+
+    def _write_data(self):
         tabs = [{"name": n, "items": [it.to_dict() for it in self._boards[i].items]}
                 for i, n in enumerate(self._tab_labels)]
-        with open(DATA_FILE,"w") as f: json.dump({"tabs": tabs}, f, indent=2)
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = DATA_FILE.with_name(DATA_FILE.name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"tabs": tabs}, f, ensure_ascii=False)
+            os.replace(tmp, DATA_FILE)       # atomowo — awaria w trakcie zapisu nie psuje historii
+        except OSError as e:
+            print("save:", e); return
+        if self._loaded_ok:
+            self._sweep_media(tabs)
+
+    def _sweep_media(self, tabs):
+        """Kasuje pliki z img/ i gif/, do których nie odwołuje się żadna karta."""
+        used = {d["file"] for t in tabs for d in t["items"] if d.get("file")}
+        for sub in ("img", "gif"):
+            folder = DATA_DIR / sub
+            try: names = os.listdir(folder)
+            except OSError: continue
+            for n in names:
+                if n not in used:
+                    try: (folder / n).unlink()
+                    except OSError: pass     # np. plik chwilowo zajęty — spróbujemy przy następnym zapisie
 
     def _find_tab(self, name):
         try: return self._tab_labels.index(name)
@@ -1437,8 +1562,8 @@ class MainPanel(QWidget):
                 cb.setText(item.text)
                 self._last_text = item.text.strip()
                 self._last_processed = item.text.strip()
-            elif item.ctype == "image" and item.img_b64:
-                ba = QByteArray(base64.b64decode(item.img_b64))
+            elif item.ctype == "image" and (item.file or item.img_b64):
+                ba = QByteArray(item.raw())
                 img = QImage.fromData(ba)
                 if not img.isNull():
                     mime = QMimeData()
@@ -1448,18 +1573,19 @@ class MainPanel(QWidget):
                     cb.setMimeData(mime)
                     self._last_img = (ba.size(), "png")
                     self._last_text = ""
-            elif item.ctype == "gif" and item.img_b64:
-                raw = base64.b64decode(item.img_b64)
-                mime = QMimeData()
-                # Plik .gif (czaty, Explorer, Discord/Slack/Teams wklejają animację),
-                # surowy image/gif oraz pierwsza klatka jako obraz (Paint, Word itd.)
-                try: mime.setUrls([QUrl.fromLocalFile(str(_gif_temp_file(raw)))])
-                except OSError: pass
-                mime.setData("image/gif", QByteArray(raw))
-                first = QImage.fromData(QByteArray(raw))
-                if not first.isNull(): mime.setImageData(first)
-                cb.setMimeData(mime)
-                self._last_text = ""
+            elif item.ctype == "gif" and (item.file or item.img_b64):
+                raw = item.raw()
+                if raw:
+                    mime = QMimeData()
+                    # Plik .gif prosto z img/gif (czaty, Explorer, Discord/Slack/Teams wklejają animację),
+                    # surowy image/gif oraz pierwsza klatka jako obraz (Paint, Word itd.)
+                    if item.file and item.path().exists():
+                        mime.setUrls([QUrl.fromLocalFile(str(item.path()))])
+                    mime.setData("image/gif", QByteArray(raw))
+                    first = QImage.fromData(QByteArray(raw))
+                    if not first.isNull(): mime.setImageData(first)
+                    cb.setMimeData(mime)
+                    self._last_text = ""
         finally:
             QTimer.singleShot(200, lambda: setattr(self, '_ignore_clipboard', False))
         self.hide_to_tray()
@@ -1476,8 +1602,7 @@ class MainPanel(QWidget):
         cb.dataChanged.connect(self._poll_clip)
 
     def _add_gif(self, data: bytes):
-        self._boards[self._last_tab].add_item(
-            ClipItem("gif", img_b64=base64.b64encode(data).decode()))
+        self._boards[self._last_tab].add_item(ClipItem.media("gif", data))
 
     def _fetch_gif(self, url: str, fallback_png: bytes):
         """Pobiera GIF z URL-a asynchronicznie; przy porażce dodaje statyczny obraz z fallbacku."""
@@ -1498,8 +1623,7 @@ class MainPanel(QWidget):
         if _is_animated_gif(data):
             self._add_gif(data)
         elif fallback_png:
-            self._boards[self._last_tab].add_item(
-                ClipItem("image", img_b64=base64.b64encode(fallback_png).decode()))
+            self._boards[self._last_tab].add_item(ClipItem.media("image", fallback_png))
         else:
             return
         self._save_data()
@@ -1560,7 +1684,7 @@ class MainPanel(QWidget):
                             ba = QByteArray(); b = QBuffer(ba); b.open(QBuffer.WriteOnly)
                             img.save(b, "PNG")
                             if not self._is_paused:
-                                self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
+                                self._boards[self._last_tab].add_item(ClipItem.media("image", bytes(ba)))
                             added = True
             if added:
                 if not self._is_paused:
@@ -1606,7 +1730,7 @@ class MainPanel(QWidget):
                     return
 
             if not self._is_paused:
-                self._boards[self._last_tab].add_item(ClipItem("image", img_b64=base64.b64encode(bytes(ba)).decode()))
+                self._boards[self._last_tab].add_item(ClipItem.media("image", bytes(ba)))
                 self._save_data()
             self._last_update = now
             return
@@ -1728,7 +1852,7 @@ class MainPanel(QWidget):
             self._apply_geometry(); self.show(); self.raise_(); self.activateWindow()
 
     def _quit(self):
-        self._save_data(); self._save_cfg(); QApplication.quit()
+        self._save_data(); self._flush_save(); self._save_cfg(); QApplication.quit()
 
     def closeEvent(self, e):
         e.ignore(); self._save_data(); self._save_cfg(); self.hide_to_tray()
