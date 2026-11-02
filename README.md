@@ -36,6 +36,7 @@ There're two remove buttons:
 
 <br><br>
 
-<img width="1920" height="869" alt="image" src="https://github.com/user-attachments/assets/6a13776d-97e7-4948-b573-be224ea7425f" />
+<img width="1920" height="869" alt="image" src="https://github.com/user-attachments/assets/5992a31d-efd0-44b7-9be0-496f5a509944" />
+
 
 
