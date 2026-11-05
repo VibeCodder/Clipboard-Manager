@@ -27,13 +27,14 @@ from PySide6.QtWidgets import (
     QLabel, QScrollArea, QLineEdit, QSystemTrayIcon, QMenu, QDialog,
     QMessageBox, QInputDialog, QFrame, QSizePolicy, QTextEdit, QSpinBox,
     QLayout, QCheckBox, QRadioButton, QButtonGroup, QGraphicsOpacityEffect,
+    QAbstractButton,
 )
 # DODANO QMimeData DO IMPORTÓW PONIŻEJ
-from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QEvent, QBuffer, QSize, QRect, QPoint, QPointF, QMimeData, QUrl
+from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QEvent, QBuffer, QSize, QRect, QRectF, QPoint, QPointF, QMimeData, QUrl, QObject
 from PySide6.QtGui import (
     QColor, QFont, QIcon, QPixmap, QPainter, QImage,
     QGuiApplication, QKeySequence, QShortcut, QDrag,
-    QMovie, QImageReader,
+    QMovie, QImageReader, QPolygonF,
 )
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 
@@ -586,6 +587,234 @@ class FlowLayout(QLayout):
             if w: w.setParent(None); w.deleteLater()
 
 
+# ─── Przewijanie: przeciąganie myszą (jak ekran dotykowy) + strzałki po bokach ──
+
+class KineticPan(QObject):
+    """Przewijanie „jak na ekranie dotykowym”: łapiesz zawartość myszą i przeciągasz,
+    a po puszczeniu przewija się jeszcze chwilę z bezwładnością.
+    Widżety tylko zgłaszają press() / move() / release() — reszta dzieje się tutaj."""
+
+    def __init__(self, area):
+        super().__init__(area)
+        self.area = area
+        self._start = None            # punkt (globalny) naciśnięcia
+        self._last = None             # ostatni punkt (globalny)
+        self._active = False          # True, gdy przekroczono próg i faktycznie przewijamy
+        self._vx = self._vy = 0.0     # prędkość w px/s (do bezwładności)
+        self._rx = self._ry = 0.0     # ułamkowe pozostałości pikseli
+        self._t = 0.0
+        self._cursor_set = False
+        self._timer = QTimer(self); self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+
+    def press(self, gp):
+        self._timer.stop()
+        self._start = QPoint(gp); self._last = QPoint(gp)
+        self._active = False
+        self._vx = self._vy = 0.0
+        self._t = time.monotonic()
+
+    def move(self, gp):
+        """True = trwa przeciąganie (zdarzenie trzeba „połknąć”, żeby nie było kliknięcia)."""
+        if self._start is None:
+            return False
+        if not self._active:
+            if (gp - self._start).manhattanLength() < QApplication.startDragDistance():
+                return False
+            self._active = True
+            self._last = QPoint(gp); self._t = time.monotonic()
+            QApplication.setOverrideCursor(Qt.ClosedHandCursor); self._cursor_set = True
+            return True
+        now = time.monotonic()
+        dt = max(now - self._t, 1e-3)
+        dx = gp.x() - self._last.x(); dy = gp.y() - self._last.y()
+        self._scroll_by(-dx, -dy)
+        a = 0.35                                   # wygładzona prędkość
+        self._vx = (1 - a) * self._vx + a * (-dx / dt)
+        self._vy = (1 - a) * self._vy + a * (-dy / dt)
+        self._last = QPoint(gp); self._t = now
+        return True
+
+    def release(self):
+        """True = to było przeciąganie (a nie zwykłe kliknięcie)."""
+        was = self._active
+        self._start = None; self._active = False
+        self._restore_cursor()
+        if was and time.monotonic() - self._t < 0.08 and (abs(self._vx) > 60 or abs(self._vy) > 60):
+            self._timer.start()                    # „rzut” — bezwładność
+        return was
+
+    def cancel(self):
+        self._timer.stop()
+        self._start = None; self._active = False
+        self._restore_cursor()
+
+    def _restore_cursor(self):
+        if self._cursor_set:
+            QApplication.restoreOverrideCursor(); self._cursor_set = False
+
+    def _scroll_by(self, dx, dy):
+        hb, vb = self.area.horizontalScrollBar(), self.area.verticalScrollBar()
+        before = (hb.value(), vb.value())
+        self._rx += dx; self._ry += dy
+        ix, iy = int(self._rx), int(self._ry)
+        self._rx -= ix; self._ry -= iy
+        if ix: hb.setValue(hb.value() + ix)
+        if iy: vb.setValue(vb.value() + iy)
+        return before != (hb.value(), vb.value())
+
+    def _tick(self):
+        moved = self._scroll_by(self._vx * 0.016, self._vy * 0.016)
+        self._vx *= 0.93; self._vy *= 0.93         # tarcie
+        speed = max(abs(self._vx), abs(self._vy))
+        if speed < 20 or (not moved and speed > 70):      # wyhamowało albo dobiło do końca listy
+            self._timer.stop()
+
+
+class ArrowButton(QAbstractButton):
+    """Przycisk-strzałka rysowany ręcznie (bez czcionek/emoji).
+    Kliknięcie = skok o pół „strony”, przytrzymanie = płynne, ciągłe przewijanie."""
+
+    def __init__(self, direction, bar, size=26, parent=None):
+        super().__init__(parent)
+        self._dir = direction                      # "up" | "down" | "left" | "right"
+        self._bar = bar
+        self._sign = -1 if direction in ("up", "left") else 1
+        self._size = size
+        self._held = False; self._t0 = 0.0; self._target = 0
+        self.setFixedSize(size, size)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setToolTip({"up": "Przewiń w górę", "down": "Przewiń w dół",
+                         "left": "Przewiń w lewo", "right": "Przewiń w prawo"}[direction])
+        self._timer = QTimer(self); self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+        self.pressed.connect(self._on_press)
+        self.released.connect(self._on_release)
+
+    def _clamp(self, v):
+        return max(self._bar.minimum(), min(self._bar.maximum(), v))
+
+    def _on_press(self):
+        step = max(120, int(self._bar.pageStep() * 0.5))
+        self._target = self._clamp(self._bar.value() + self._sign * step)
+        self._held = True; self._t0 = time.monotonic()
+        self._timer.start()
+
+    def _on_release(self):
+        self._held = False                         # animacja dochodzi do celu i sama się zatrzyma
+
+    def _tick(self):
+        bar = self._bar
+        self._held = self._held and self.isDown()
+        if self._held and time.monotonic() - self._t0 > 0.35:
+            self._target = self._clamp(self._target + self._sign * 20)   # przytrzymanie → ciągły ruch
+        d = self._target - bar.value()
+        if d == 0:
+            if not self._held: self._timer.stop()
+            return
+        step = int(d * 0.35)
+        if step == 0: step = 1 if d > 0 else -1
+        bar.setValue(bar.value() + step)
+
+    def hideEvent(self, e):
+        self._timer.stop(); self._held = False
+        super().hideEvent(e)
+
+    def enterEvent(self, e):
+        self.update(); super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.update(); super().leaveEvent(e)
+
+    def sizeHint(self):
+        return QSize(self._size, self._size)
+
+    def paintEvent(self, e):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            bg, fg, bd = QColor(C['card']), QColor(C['t3']), QColor(C['border'])
+            bg.setAlpha(110); fg.setAlpha(110)
+        elif self.isDown():
+            bg, fg, bd = QColor(C['acc']), QColor("white"), QColor(C['acc'])
+        elif self.underMouse():
+            bg, fg, bd = QColor(C['card_h']), QColor(C['acc_glow']), QColor(C['acc'])
+        else:
+            bg, fg, bd = QColor(C['card']), QColor(C['t2']), QColor(C['border'])
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        p.setPen(bd); p.setBrush(bg); p.drawRoundedRect(r, 7, 7)
+        cx, cy = r.center().x(), r.center().y()
+        k = min(r.width(), r.height()) * 0.17
+        pts = {
+            "up":    [(-1.4*k,  .8*k), (1.4*k,  .8*k), (0, -.9*k)],
+            "down":  [(-1.4*k, -.8*k), (1.4*k, -.8*k), (0,  .9*k)],
+            "left":  [( .8*k, -1.4*k), ( .8*k, 1.4*k), (-.9*k, 0)],
+            "right": [(-.8*k, -1.4*k), (-.8*k, 1.4*k), ( .9*k, 0)],
+        }[self._dir]
+        p.setPen(Qt.NoPen); p.setBrush(fg)
+        p.drawPolygon(QPolygonF([QPointF(cx + x, cy + y) for x, y in pts]))
+
+
+class _WheelScrollArea(QScrollArea):
+    """QScrollArea, w którym kółko myszy przewija poziomo, gdy nie ma przewijania pionowego."""
+    def wheelEvent(self, e):
+        vb, hb = self.verticalScrollBar(), self.horizontalScrollBar()
+        if vb.maximum() == 0 and hb.maximum() > 0:
+            d = e.angleDelta().y() or e.angleDelta().x()
+            hb.setValue(hb.value() - d)
+            e.accept(); return
+        super().wheelEvent(e)
+
+
+class ArrowScrollArea(QWidget):
+    """Obszar przewijany ze strzałkami po bokach (pokazują się tylko, gdy zawartość się nie mieści).
+       orient="v": kolumna ▲ (góra) / ▼ (dół) po prawej stronie
+       orient="h": ◀ po lewej i ▶ po prawej stronie
+    Obiekt .pan (KineticPan) pozwala przewijać przeciąganiem myszą."""
+
+    def __init__(self, orient="v", parent=None):
+        super().__init__(parent)
+        self.orient = orient
+        self.area = _WheelScrollArea()
+        self.area.setWidgetResizable(True)
+        self.area.setFrameShape(QFrame.NoFrame)
+        self.pan = KineticPan(self.area)
+        lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(0)
+        if orient == "v":
+            self._bar = self.area.verticalScrollBar()
+            self._a = ArrowButton("up",   self._bar, 26)
+            self._b = ArrowButton("down", self._bar, 26)
+            self._side = QWidget(); self._side.setFixedWidth(32)
+            sl = QVBoxLayout(self._side); sl.setContentsMargins(0, 8, 6, 8); sl.setSpacing(0)
+            sl.addWidget(self._a); sl.addStretch(); sl.addWidget(self._b)
+            lay.addWidget(self.area, 1); lay.addWidget(self._side)
+        else:
+            self._bar = self.area.horizontalScrollBar()
+            self._a = ArrowButton("left",  self._bar, 22)
+            self._b = ArrowButton("right", self._bar, 22)
+            self._side = None
+            lay.addSpacing(2)
+            lay.addWidget(self._a, 0, Qt.AlignVCenter)
+            lay.addWidget(self.area, 1)
+            lay.addWidget(self._b, 0, Qt.AlignVCenter)
+        # Odświeżanie stanu strzałek (scalane w jedno wywołanie, żeby nie zapętlać layoutu)
+        self._sync_timer = QTimer(self); self._sync_timer.setSingleShot(True); self._sync_timer.setInterval(0)
+        self._sync_timer.timeout.connect(self._sync)
+        self._bar.rangeChanged.connect(lambda *_: self._sync_timer.start())
+        self._bar.valueChanged.connect(lambda *_: self._sync_timer.start())
+        self._sync()
+
+    def _sync(self):
+        bar = self._bar
+        over = bar.maximum() > bar.minimum()
+        if self._side is not None:
+            if self._side.isVisible() != over: self._side.setVisible(over)
+        else:
+            self._a.setVisible(over); self._b.setVisible(over)
+        self._a.setEnabled(bar.value() > bar.minimum())
+        self._b.setEnabled(bar.value() < bar.maximum())
+
+
 # ─── Dialogs ──────────────────────────────────────────────────────────────────
 
 class EditDialog(QDialog):
@@ -839,6 +1068,8 @@ class ClipCard(QFrame):
         self.setFixedWidth(CARD_W)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Minimum)
         self.setCursor(Qt.PointingHandCursor)
+        self.pan = None            # KineticPan planszy (ustawiany przez Board) — przeciąganie = przewijanie
+        self._press_ok = False
         self._build(); self._restyle()
 
     def _build(self):
@@ -1011,11 +1242,28 @@ class ClipCard(QFrame):
         self.setObjectName("CardPin" if self.item.pinned else "Card")
         self.style().unpolish(self); self.style().polish(self)
 
+    # Klik (kopiuj i ukryj) dopiero po PUSZCZENIU przycisku — dzięki temu przeciągnięcie karty
+    # myszą przewija listę (jak na ekranie dotykowym), a nie kopiuje karty.
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            if not isinstance(self.childAt(e.pos()), QPushButton):
-                self.sig_click.emit(self.item)
+            self._press_ok = not isinstance(self.childAt(e.position().toPoint()), QPushButton)
+            if self._press_ok and self.pan is not None:
+                self.pan.press(e.globalPosition().toPoint())
         super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._press_ok and self.pan is not None and (e.buttons() & Qt.LeftButton):
+            if self.pan.move(e.globalPosition().toPoint()):
+                e.accept(); return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self._press_ok:
+            self._press_ok = False
+            panned = self.pan.release() if self.pan is not None else False
+            if not panned and self.rect().contains(e.position().toPoint()):
+                self.sig_click.emit(self.item)
+        super().mouseReleaseEvent(e)
 
 
 # ─── Board ────────────────────────────────────────────────────────────────────
@@ -1026,7 +1274,24 @@ class DropContainer(QWidget):
         super().__init__()
         self.board = board
         self.indicator = None
+        self.pan = None            # KineticPan (ustawiany przez Board)
         self.setAcceptDrops(True)
+
+    # Przeciąganie myszą po pustym tle (między kartami) też przewija listę
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.pan is not None:
+            self.pan.press(e.globalPosition().toPoint())
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        if self.pan is not None and (e.buttons() & Qt.LeftButton):
+            self.pan.move(e.globalPosition().toPoint())
+        e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if self.pan is not None:
+            self.pan.release()
+        e.accept()
 
     def set_indicator(self, rect):
         if rect != self.indicator:
@@ -1056,13 +1321,20 @@ class Board(QWidget):
         self._pending_drop = None
         self._rebuild_pending = False
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
+        # Przewijanie: kółko, pasek, strzałki ▲▼ po prawej i przeciąganie myszą (jak na telefonie)
+        self._scroller = ArrowScrollArea("v")
+        self.scroll = self._scroller.area
+        self.pan = self._scroller.pan
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.cont = DropContainer(self); self.cont.setStyleSheet("background:transparent;")
+        self.cont.pan = self.pan
         self.flow = FlowLayout(self.cont, margin=10, h_sp=8, v_sp=8)
         self.scroll.setWidget(self.cont)
-        lay.addWidget(self.scroll)
+        lay.addWidget(self._scroller)
+
+    def hideEvent(self, e):
+        self.pan.cancel()          # nie zostawiaj kursora „łapki” / bezwładności po schowaniu panelu
+        super().hideEvent(e)
 
     def add_item(self, item):
         # --- ZMIANA: Usuwanie duplikatu i przesuwanie na górę ---
@@ -1108,6 +1380,7 @@ class Board(QWidget):
         if self._drag_item is not None:      # nie niszcz kart w trakcie przeciągania
             self._rebuild_pending = True
             return
+        self.pan.cancel()
         self.flow.clear()
         visible = [it for it in self.items
                    if not self._filter
@@ -1115,6 +1388,7 @@ class Board(QWidget):
                    or self._filter in it.text.lower()]
         for it in sorted(visible, key=lambda x: not x.pinned):   # stabilnie: przypięte na górze, reszta wg kolejności listy
             c = ClipCard(it)
+            c.pan = self.pan
             c.sig_click.connect(self.item_clicked)
             c.sig_remove.connect(self._on_remove)
             c.sig_pin.connect(self._on_pin)
@@ -1384,7 +1658,16 @@ class MainPanel(QWidget):
         tb_w.mousePressEvent   = self._drag_press
         tb_w.mouseMoveEvent    = self._drag_move
         tb_w.mouseReleaseEvent = self._drag_release
-        tb = QHBoxLayout(tb_w); tb.setContentsMargins(12,0,8,0); tb.setSpacing(6)
+        # Zawartość paska jest przewijana poziomo (kółko myszy albo strzałki ◀ ▶ po bokach),
+        # gdy się nie mieści — np. w wąskim oknie / na ekranie w trybie portrait.
+        tb_outer = QHBoxLayout(tb_w); tb_outer.setContentsMargins(0,0,0,0); tb_outer.setSpacing(0)
+        self._tb_scroller = ArrowScrollArea("h")
+        self._tb_scroller.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._tb_scroller.area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        tb_inner = QWidget(); tb_inner.setObjectName("ToolbarInner")
+        tb = QHBoxLayout(tb_inner); tb.setContentsMargins(12,0,8,0); tb.setSpacing(6)
+        self._tb_scroller.area.setWidget(tb_inner)
+        tb_outer.addWidget(self._tb_scroller)
 
         self._btn_new_card = QPushButton("+ New Card")
         self._btn_new_card.setObjectName("BtnNewCard")
