@@ -37,7 +37,6 @@ There're two remove buttons:
 
 <br><br>
 
-<img width="1920" height="869" alt="image" src="https://github.com/user-attachments/assets/5992a31d-efd0-44b7-9be0-496f5a509944" />
 <br><br>
 There is even a portrait mode with arrows.
 <br><br>
