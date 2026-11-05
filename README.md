@@ -11,7 +11,8 @@ pip install keyboard PySide6
 ### Tap <code>Ctrl + `</code> button (by default) to bring panel up. The same key pressed again hides it. Key can be changed in settings.
 <br>
 
-<img width="1920" height="1020" alt="chrome_YrjoH14t78" src="https://github.com/user-attachments/assets/3683fb00-7b2f-4cef-8c83-e3db9128c430" />
+<img width="1920" height="869" alt="image" src="https://github.com/user-attachments/assets/435dbd38-c4c3-4d21-a984-42ec32640ebd" />
+
 
 
 <br>
