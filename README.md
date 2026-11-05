@@ -32,7 +32,11 @@ There're two remove buttons:
 
 
 
-https://github.com/user-attachments/assets/aefcbaf6-6cbb-4eb5-b5af-e925f7e0a804
+
+
+https://github.com/user-attachments/assets/5e8392fa-5526-420e-a204-c1ba1b6d0a61
+
+
 
 
 
