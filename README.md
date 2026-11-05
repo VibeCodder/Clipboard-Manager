@@ -30,7 +30,7 @@ There're two remove buttons:
 - `Remove all 🗑️📌` removes all from board (within current tab) including pinned cards.
 ``works ⏸️`` button is like a switcher; blocks app from adding new cards when it's not necessary.
 
-<img width="1020" height="869" alt="chrome_FwyevGLCXV" src="https://github.com/user-attachments/assets/f76b0fba-6077-43e2-8702-e179cd437a80" />
+<img width="1020" height="1020" alt="chrome_FwyevGLCXV" src="https://github.com/user-attachments/assets/f76b0fba-6077-43e2-8702-e179cd437a80" />
 
 
 
