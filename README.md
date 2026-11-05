@@ -17,11 +17,8 @@ pip install keyboard PySide6
 
 <br>
 
-### The app alows you to store text, image, gif and even Excel data every time you copy sth to your clipboard.
+### The app allows you to store text, image, gif and even Excel data every time you copy sth to your clipboard.
 Even multiple tabs can be created for easier management. You can pin, change text of your cards anytime.  
-
-<img width="1920" height="375" alt="pythonw_efaTRUYirE" src="https://github.com/user-attachments/assets/9d8d919b-f935-4150-a9a1-194efa24f250" />
-
 
 <br>
 
@@ -33,7 +30,8 @@ There're two remove buttons:
 - `Remove all 🗑️📌` removes all from board (within current tab) including pinned cards.
 ``works ⏸️`` button is like a switcher; blocks app from adding new cards when it's not necessary.
 
-<img width="1920" height="375" alt="image" src="https://github.com/user-attachments/assets/67fd039e-3822-4391-be47-c1e3eb437d8e" />
+<img width="1920" height="375" alt="pythonw_a8Q9ELhctv" src="https://github.com/user-attachments/assets/81a4d01c-97a7-4866-834a-1b66301e128e" />
+
 
 
 <br><br>
